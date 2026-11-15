@@ -1,0 +1,11 @@
+{
+  "name": "دفتري",
+  "short_name": "دفتري",
+  "start_url": "./",
+  "display": "standalone",
+  "background_color": "#10251F",
+  "theme_color": "#10251F",
+  "dir": "rtl",
+  "lang": "ar",
+  "icons": [{ "src": "icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }]
+}

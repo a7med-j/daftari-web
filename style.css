@@ -1,0 +1,32 @@
+:root { --ink: #10251F; --panel: #172C24; --green: #20B879; --text: #fff; --muted: #b9d9c9; }
+* { box-sizing: border-box; }
+html, body { margin: 0; min-height: 100%; background: var(--ink); color: var(--text);
+  font-family: system-ui, -apple-system, "Segoe UI", Tahoma, sans-serif; }
+header { display: flex; align-items: center; gap: 8px; padding: 10px 14px; background: var(--panel); }
+.brand { display: flex; align-items: center; gap: 8px; font-size: 18px; }
+.logo { display: inline-grid; place-items: center; width: 32px; height: 32px; border-radius: 9px; background: var(--green); }
+.spacer { flex: 1; }
+main.narrow { max-width: 480px; margin: 0 auto; padding: 16px; }
+.card { background: var(--panel); border: 1px solid #2c4a3d; border-radius: 14px; padding: 16px; margin-bottom: 16px;
+  display: flex; flex-direction: column; gap: 10px; }
+h2, h3 { margin: 4px 0; }
+input { width: 100%; padding: 12px; border-radius: 10px; border: 1px solid #4f6b5f; background: #0b1c16; color: #fff; font-size: 16px; }
+.row { display: flex; gap: 8px; }
+button { font: inherit; }
+button.primary { padding: 12px 18px; border: 0; border-radius: 12px; background: var(--green); color: #fff; font-weight: 700; font-size: 16px; cursor: pointer; }
+button.primary:disabled { opacity: .6; }
+button.link { background: none; border: 0; color: var(--green); cursor: pointer; padding: 6px; }
+.note, .muted { color: var(--muted); }
+.list { display: flex; flex-direction: column; gap: 10px; }
+button.app { text-align: start; display: flex; flex-direction: column; gap: 4px; padding: 14px; border-radius: 14px;
+  background: #16302a; border: 1px solid rgba(32,184,121,.45); color: #fff; cursor: pointer; }
+button.app small { color: var(--muted); }
+.runner { min-height: 100vh; }
+.runner .stage { width: 100%; }
+.close { position: fixed; top: 10px; inset-inline-start: 10px; z-index: 10; border: 0; border-radius: 20px; padding: 6px 14px;
+  background: rgba(16,37,31,.8); color: #fff; cursor: pointer; }
+.hinted::placeholder { color: var(--hint, #8a9a92); opacity: 1; }
+#toast { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%) translateY(120%); max-width: 92vw;
+  background: #e6e1e5; color: #1d1b20; padding: 14px 18px; border-radius: 10px; box-shadow: 0 4px 14px rgba(0,0,0,.3);
+  transition: transform .25s; z-index: 20; }
+#toast.show { transform: translateX(-50%) translateY(0); }
