@@ -15,7 +15,7 @@ const COMMON = {
 
 const BY_TYPE = {
   BUTTON: { textColor: "#FFFFFFFF", textAlign: "center", backgroundColor: "#FF20B879", borderWidth: "0" },
-  TEXT_FIELD: { hint: "اكتب هنا", hintColor: "#FF8A9A92", inputType: "text", maxLength: "0", readOnly: "false", required: "false" },
+  TEXT_FIELD: { hint: "اكتب هنا", hintColor: "#FF8A9A92", inputType: "text", maxLength: "0", readOnly: "false", required: "false", suggestAfter: "1" },
   LABEL: { fontSize: "16", backgroundColor: "#00FFFFFF", borderWidth: "0", maxLines: "0" },
   DROPDOWN: { items: "خيار 1\nخيار 2\nخيار 3", selectedIndex: "-1", hint: "اختر" },
   TABLE: {
@@ -131,6 +131,15 @@ export function searchAll(rows, criteria, mode = "exact") {
     if (row.length && wanted.every(([col, v]) => matches(normalize(row[col] ?? ""), v))) found.push(n);
   }
   return found;
+}
+
+/** How a text field suggests while typing (see Component.autocompleteMode in the app). */
+function autocompleteMode(c) {
+  if (c.type !== "TEXT_FIELD" || prop(c, "formula").trim()) return "off";
+  if (["number", "decimal", "password"].includes(prop(c, "inputType"))) return "off";
+  const p = c.properties || {};
+  if (p.autocomplete) return p.autocomplete;
+  return p.suggest === "true" ? "record" : "field";
 }
 
 /** Rows whose cell in the column contains what was typed: [row number, text], distinct, starts first. */
@@ -587,20 +596,28 @@ export function runScreen(root, project, screen, store, opts) {
         // Suggestions from the sheet while typing; picking one shows that record.
         let menu = null;
         const col = binds.find(([b]) => b === c)?.[1];
+        const mode = autocompleteMode(c);
         const suggest = async () => {
           menu?.remove(); menu = null;
-          if (!bool(c, "suggest") || col == null || !store) return;
+          if (mode === "off" || col == null || !store) return;
+          const typed = values[c.id] || "";
+          if (typed.trim().length < Math.max(1, Math.trunc(num(c, "suggestAfter")))) return;
           if (!state.sheetRows) { try { state.sheetRows = await store.rows(); } catch (e) { return; } }
           const rows = state.sheetRows;
-          const shown = state.currentRow ? (rows[state.currentRow - 1] || [])[col] : null;
-          if (shown != null && normalize(shown) === normalize(values[c.id])) return;
-          const list = suggestions(rows, col, values[c.id]);
-          if (!list.length) return;
+          let list = suggestions(rows, col, typed);
+          // Nothing to offer once the field already holds the value.
+          if (list.some(([, v]) => normalize(v) === normalize(typed)) && (mode === "field" || list.length === 1)) {
+            list = list.filter(([, v]) => normalize(v) !== normalize(typed));
+          }
+          if (!list.length || values[c.id] !== typed) return;
           const r = input.getBoundingClientRect();
           menu = h("div", { position: "fixed", left: r.left + "px", top: r.bottom + 4 + "px", minWidth: Math.max(r.width, 160) + "px", background: "#fff", color: "#183328",
             borderRadius: "8px", boxShadow: "0 4px 14px #0004", zIndex: "40", overflow: "hidden", fontSize: "14px" }, { dir: lang === "en" ? "ltr" : "rtl" },
             ...list.map(([n, text]) => h("div", { padding: "9px 12px", cursor: "pointer", borderBottom: "1px solid #eee" },
-              { onmousedown: e => { e.preventDefault(); menu?.remove(); menu = null; state.lastCriteria = null; showRow(rows, n); } }, text)));
+              { onmousedown: e => {
+                e.preventDefault(); menu?.remove(); menu = null;
+                if (mode === "record") { state.lastCriteria = null; showRow(rows, n); } else setValue(c, text);
+              } }, text)));
           document.body.append(menu);
         };
         const input = h(multiline ? "textarea" : "input",
