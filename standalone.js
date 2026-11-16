@@ -270,11 +270,15 @@ export async function runStandalone(CONFIG, ICON) {
       const data = snap.data();
       const latest = JSON.parse(data.json); // the owner's latest published design
       const store = cloudStore(CONFIG.appId, data.headers || []);
+      // The owner and members the owner made editors may change records; other members only look.
+      const canEdit = data.ownerUid === user.uid ||
+        (await fb.getDoc(fb.doc(db, "apps", CONFIG.appId, "members", user.uid))).data()?.role === "editor";
+      const requestAccess = () => fb.setDoc(fb.doc(db, "apps", CONFIG.appId, "requests", user.uid), { email: user.email || "", at: Date.now() });
       setMenu([
         [t("تصدير البيانات إلى Excel", "Export data to Excel"), () => exportExcel(store)],
         [t("تسجيل الخروج", "Sign out"), () => fb.signOut(fb.auth)],
       ]);
-      runApp(stage, latest, store, { lang, t, toast, confirm: confirmBox, errorText, onScreen: screen => { document.body.style.background = bg(screen); } });
+      runApp(stage, latest, store, { lang, t, toast, confirm: confirmBox, errorText, canEdit, requestAccess, onScreen: screen => { document.body.style.background = bg(screen); } });
     } catch (e) {
       stage.replaceChildren(node("div", { class: "center" }, node("p", {}, errorText(e)),
         node("button", { class: "lnk", onclick: () => fb.signOut(fb.auth) }, t("تسجيل الخروج", "Sign out"))));
@@ -290,9 +294,15 @@ export async function runStandalone(CONFIG, ICON) {
     const go = node("button", { class: "btn" });
     const toggle = node("button", { class: "lnk" });
     const msg = node("p", { class: "muted" });
+    const forgot = node("button", { class: "lnk" }, t("نسيت كلمة المرور؟", "Forgot password?"));
+    forgot.onclick = async () => {
+      if (!email.value.trim()) { msg.textContent = t("اكتب بريدك الإلكتروني أولًا ثم اضغط «نسيت كلمة المرور».", "Type your email first, then tap \"Forgot password\"."); return; }
+      try { await fb.sendPasswordResetEmail(fb.auth, email.value.trim()); msg.textContent = t("أرسلنا رابط إعادة تعيين كلمة المرور إلى بريدك (تحقق من البريد غير الهام).", "We sent a password reset link to your email (check spam too)."); }
+      catch (e) { msg.textContent = errorText(e); }
+    };
     const paint = () => { go.textContent = signUp ? t("إنشاء حساب", "Create account") : t("تسجيل الدخول", "Sign in"); toggle.textContent = signUp ? t("لدي حساب", "I have an account") : t("حساب جديد", "New account"); };
     paint();
-    toggle.onclick = () => { signUp = !signUp; paint(); };
+    toggle.onclick = () => { signUp = !signUp; forgot.hidden = signUp; paint(); };
     go.onclick = async () => {
       go.disabled = true; msg.textContent = "";
       try { await (signUp ? fb.createUserWithEmailAndPassword : fb.signInWithEmailAndPassword)(fb.auth, email.value.trim(), pass.value); }
@@ -301,7 +311,7 @@ export async function runStandalone(CONFIG, ICON) {
     };
     stage.replaceChildren(node("div", { class: "center" },
       node("img", { src: ICON, alt: "" }), node("h2", {}, CONFIG.name), node("p", { class: "muted" }, t("سجّل دخولك للمتابعة", "Sign in to continue")),
-      email, pass, go, toggle, msg));
+      email, pass, go, toggle, forgot, msg));
   }
 
   fb.onAuthStateChanged(fb.auth, user => (user ? openShared(user) : loginView()));

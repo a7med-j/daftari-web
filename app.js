@@ -158,7 +158,9 @@ async function join(user, code) {
   if (!codeDoc.exists()) throw fail("not-found-code");
   const { appId, ownerUid } = codeDoc.data();
   if (ownerUid !== user.uid) {
-    await setDoc(doc(db, "apps", appId, "members", user.uid), { code, email: user.email || "", joinedAt: Date.now() });
+    // Already a member: joining again keeps the membership (and the access the owner gave).
+    const member = await getDoc(doc(db, "apps", appId, "members", user.uid)).catch(() => null);
+    if (!member?.exists()) await setDoc(doc(db, "apps", appId, "members", user.uid), { code, email: user.email || "", joinedAt: Date.now() });
   }
   const app = await getDoc(doc(db, "apps", appId));
   if (!app.exists()) throw fail("app-gone");
@@ -260,8 +262,11 @@ async function appView(user, appId) {
       const data = snap.data();
       const project = JSON.parse(data.json);
       document.title = project.name;
+      // The owner and members the owner made editors may change records; other members only look.
+      const canEdit = data.ownerUid === user.uid || (await getDoc(doc(db, "apps", appId, "members", user.uid))).data()?.role === "editor";
+      const requestAccess = () => setDoc(doc(db, "apps", appId, "requests", user.uid), { email: user.email || "", at: Date.now() });
       const app = runApp(stage, project, cloudStore(appId, data.headers || []), {
-        lang, t, toast, confirm: confirmBox, errorText,
+        lang, t, toast, confirm: confirmBox, errorText, canEdit, requestAccess,
         onScreen: screen => { wrap.style.background = cssBackground(screen); },
       });
       cleanup = app.cleanup;

@@ -431,6 +431,8 @@ export function runScreen(root, project, screen, store, opts) {
     if (action === "pdfRecord") return recordReport();
     if (action === "pdfTable") return tableReport();
     if (!store) return toast(t("هذا التطبيق غير مرتبط ببيانات.", "This app has no data source."));
+    const writes = ["addRow", "updateRow", "deleteRow"].includes(action);
+    if (writes && opts.canEdit === false) return noAccess();
     if (!binds.length) return toast(t("لا يوجد حقل مرتبط بعمود.", "No field is linked to a column."));
     if (state.working) return;
     state.working = true;
@@ -477,10 +479,31 @@ export function runScreen(root, project, screen, store, opts) {
       }
       await reloadTables();
     } catch (e) {
-      toast(opts.errorText(e));
+      if (writes && String(e?.code || "").includes("permission-denied")) noAccess();
+      else toast(opts.errorText(e));
     } finally {
       state.working = false;
     }
+  }
+
+  /** A member who may only look: says so, and offers to ask the owner for editing rights. */
+  function noAccess() {
+    const close = () => overlay.remove();
+    const send = h("button", { padding: "10px 16px", border: "0", borderRadius: "10px", background: "#20B879", color: "#fff", fontSize: "15px", cursor: "pointer" },
+      { onclick: async () => {
+        send.disabled = true;
+        try { await opts.requestAccess(); close(); toast(t("تم إرسال طلبك لصاحب التطبيق.", "Your request was sent to the app's owner.")); }
+        catch (e) { send.disabled = false; toast(opts.errorText(e)); }
+      } }, t("إرسال طلب لصاحب التطبيق", "Ask the owner for access"));
+    const overlay = h("div", { position: "fixed", inset: "0", background: "#0008", display: "flex", alignItems: "center", justifyContent: "center", zIndex: "50" },
+      { dir: lang === "en" ? "ltr" : "rtl", onclick: e => { if (e.target === overlay) close(); } },
+      h("div", { background: "#172C24", color: "#fff", borderRadius: "14px", padding: "18px", width: "min(92vw, 400px)", display: "flex", flexDirection: "column", gap: "10px" }, {},
+        h("div", { fontWeight: "bold", fontSize: "17px" }, {}, t("غير مصرّح لك بالإضافة أو التعديل", "You can't add or change records")),
+        h("div", { color: "#b9d9c9", fontSize: "14px" }, {}, t("يمكنك البحث والاطلاع على البيانات وتصديرها إلى Excel. لتتمكن من الحفظ والتعديل والحذف اطلب الصلاحية من صاحب التطبيق.",
+          "You can search, view and export the data to Excel. To save, change or delete, ask the app's owner for access.")),
+        opts.requestAccess ? send : null,
+        h("button", { background: "none", border: "0", color: "#b9d9c9", fontSize: "15px", cursor: "pointer" }, { onclick: close }, t("إغلاق", "Close"))));
+    document.body.append(overlay);
   }
 
   function caption(c) {
