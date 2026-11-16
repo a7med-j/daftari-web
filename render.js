@@ -115,15 +115,37 @@ export function normalize(text) {
 }
 
 /** First data row number (Excel numbering, after `after`) matching every filled criterion. */
-export function search(rows, criteria, after = 1) {
+export function search(rows, criteria, after = 1, mode = "exact") {
+  return searchAll(rows, criteria, mode).find(n => n > after) ?? null;
+}
+
+/** Every matching data row (Excel row numbers), like FormLogic.searchAll. */
+export function searchAll(rows, criteria, mode = "exact") {
   const wanted = Object.entries(criteria).filter(([, v]) => String(v).trim() !== "").map(([k, v]) => [Number(k), normalize(v)]);
-  if (!wanted.length) return null;
-  for (let n = after + 1; n <= rows.length; n++) {
+  if (!wanted.length) return [];
+  const matches = (cell, v) => mode === "contains" ? cell.includes(v) : mode === "startsWith" ? cell.startsWith(v)
+    : cell === v || (cell !== "" && v !== "" && !isNaN(Number(cell)) && !isNaN(Number(v)) && Number(cell) === Number(v));
+  const found = [];
+  for (let n = 2; n <= rows.length; n++) {
     const row = rows[n - 1] || [];
-    if (!row.length) continue;
-    if (wanted.every(([col, v]) => normalize(row[col] ?? "") === v)) return n;
+    if (row.length && wanted.every(([col, v]) => matches(normalize(row[col] ?? ""), v))) found.push(n);
   }
-  return null;
+  return found;
+}
+
+/** Rows whose cell in the column contains what was typed: [row number, text], distinct, starts first. */
+export function suggestions(rows, column, typed, limit = 6) {
+  const wanted = normalize(typed);
+  if (!wanted) return [];
+  const seen = new Set(), starts = [], inside = [];
+  for (let n = 2; n <= rows.length; n++) {
+    const cell = (rows[n - 1] || [])[column] ?? "";
+    const v = normalize(cell);
+    if (!v || !v.includes(wanted) || seen.has(v)) continue;
+    seen.add(v);
+    (v.startsWith(wanted) ? starts : inside).push([n, cell]);
+  }
+  return [...starts, ...inside].slice(0, limit);
 }
 
 // ---- Calculations (same rules as Formula.kt): + - * / ( ), 15%, names bare or in [brackets] ----
@@ -345,11 +367,54 @@ export function runScreen(root, project, screen, store, opts) {
     .map(([c, col]) => headers[col] || c.name);
 
   async function reloadTables() {
-    if (!store || !tables.length) return;
+    if (!store) return;
+    if (!tables.length) { state.sheetRows = null; return; } // suggestions read the sheet again when needed
     try { state.sheetRows = await store.rows(); tables.forEach(draw => draw()); } catch (e) { toast(opts.errorText(e)); }
   }
 
-  async function perform(action, target) {
+  /** What a search button looks for (see FormLogic.searchCriteria). */
+  // While a record is shown, only what the user changed since counts as the question.
+  const startOf = (c, col) => (state.currentRow != null && state.filledSnapshot ? state.filledSnapshot[col] ?? "" : startValue(c, lang));
+
+  function searchCriteria(field) {
+    const valueOf = c => computed[c.id] ?? values[c.id] ?? "";
+    if (field) {
+      const hit = binds.find(([c]) => normalize(c.name) === normalize(field));
+      return hit && String(valueOf(hit[0])).trim() ? { [hit[1]]: valueOf(hit[0]) } : {};
+    }
+    return Object.fromEntries(binds.filter(([c, col]) => c.type !== "CHECKBOX" && c.type !== "PHOTO" && !prop(c, "formula").trim() &&
+      String(valueOf(c)).trim() && normalize(valueOf(c)) !== normalize(startOf(c, col))).map(([c, col]) => [col, valueOf(c)]));
+  }
+
+  function showRow(rows, n) {
+    fill(rows[n - 1]);
+    state.currentRow = n; state.filledSnapshot = formValues();
+    toast(t(`تم عرض الصف ${n}`, `Showing row ${n}`));
+    tables.forEach(draw => draw());
+  }
+
+  /** Several rows matched: a list to pick one from. */
+  function pickResult(rows, found) {
+    const order = screen.components.filter(c => INPUT_TYPES.has(c.type)).sort((a, b) => a.y - b.y || a.x - b.x)
+      .map(c => binds.find(([b]) => b === c)?.[1]).filter(col => col != null);
+    const close = () => overlay.remove();
+    const list = h("div", { overflow: "auto", maxHeight: "60vh" });
+    for (const n of found.slice(0, 300)) {
+      const row = rows[n - 1];
+      list.append(h("div", { padding: "10px 4px", borderBottom: "1px solid #2C4A3D", cursor: "pointer" }, { onclick: () => { close(); showRow(rows, n); } },
+        h("div", {}, {}, order.map(col => row[col] ?? "").filter(v => String(v).trim()).slice(0, 4).join(" • ")),
+        h("div", { fontSize: "11px", color: "#8a9a92" }, {}, t(`الصف ${n}`, `Row ${n}`))));
+    }
+    const overlay = h("div", { position: "fixed", inset: "0", background: "#0008", display: "flex", alignItems: "center", justifyContent: "center", zIndex: "50" },
+      { dir: lang === "en" ? "ltr" : "rtl", onclick: e => { if (e.target === overlay) close(); } },
+      h("div", { background: "#172C24", color: "#fff", borderRadius: "14px", padding: "16px", width: "min(92vw, 420px)" }, {},
+        h("div", { fontWeight: "bold", marginBottom: "8px" }, {}, t(`وُجدت ${found.length} نتائج، اختر واحدة`, `${found.length} matches, pick one`)),
+        list,
+        h("button", { marginTop: "10px", background: "none", border: "0", color: "#20B879", fontSize: "15px", cursor: "pointer" }, { onclick: close }, t("إغلاق", "Close"))));
+    document.body.append(overlay);
+  }
+
+  async function perform(action, target, button) {
     if (!action) return;
     if (action === "clear") return clearForm();
     if (action === "openScreen") return opts.openScreen ? opts.openScreen(target) : null;
@@ -370,19 +435,21 @@ export function runScreen(root, project, screen, store, opts) {
         clearForm();
         toast(t(`تمت إضافة الصف رقم ${row} ✓`, `Row ${row} added ✓`));
       } else if (action === "search") {
-        const form = formValues();
-        const again = state.currentRow != null && sameForm(form, state.filledSnapshot) && state.lastCriteria;
-        const criteria = again ? state.lastCriteria : Object.fromEntries(Object.entries(form).filter(([, v]) => String(v).trim()));
-        if (!Object.keys(criteria).length) return toast(t("اكتب قيمة في حقل أو أكثر ثم اضغط بحث.", "Type a value in one or more fields, then search."));
+        const field = button ? prop(button, "searchField") : "";
+        const mode = (button && prop(button, "matchMode")) || "exact";
+        const again = state.currentRow != null && sameForm(formValues(), state.filledSnapshot) && state.lastCriteria;
+        const criteria = again ? state.lastCriteria : searchCriteria(field);
+        if (!Object.keys(criteria).length) {
+          return toast(field ? t(`اكتب قيمة في حقل «${field}» ثم اضغط بحث.`, `Type a value in "${field}", then search.`)
+            : t("اكتب قيمة في حقل أو أكثر ثم اضغط بحث.", "Type a value in one or more fields, then search."));
+        }
         const rows = await store.rows();
         state.sheetRows = rows;
-        const found = search(rows, criteria, again ? state.currentRow : 1) ?? (again ? search(rows, criteria) : null);
-        if (found == null) toast(t("لا توجد نتيجة مطابقة.", "No matching row."));
-        else {
-          fill(rows[found - 1]);
-          state.currentRow = found; state.lastCriteria = criteria; state.filledSnapshot = formValues();
-          toast(t(`وُجد في الصف ${found}. اضغط بحث مرة أخرى للنتيجة التالية.`, `Found in row ${found}. Search again for the next match.`));
-        }
+        state.lastCriteria = criteria;
+        const found = searchAll(rows, criteria, mode);
+        if (!found.length) toast(t("لا توجد نتيجة مطابقة.", "No matching row."));
+        else if (found.length === 1) showRow(rows, found[0]);
+        else pickResult(rows, found);
       } else if (action === "updateRow") {
         const row = state.currentRow;
         if (row == null) return toast(t("ابحث عن الصف أولًا ثم عدّله.", "Search for the row first, then edit it."));
@@ -501,7 +568,7 @@ export function runScreen(root, project, screen, store, opts) {
       }
       case "BUTTON": {
         const el = h("button", { ...chrome(c), ...style, width: "100%", height: "100%", cursor: enabled ? "pointer" : "default", display: "flex", alignItems: "center", justifyContent: justify(prop(c, "textAlign")) },
-          { disabled: !enabled, onclick: () => perform(prop(c, "action"), prop(c, "targetScreen")) }, c.text);
+          { disabled: !enabled, onclick: () => perform(prop(c, "action"), prop(c, "targetScreen"), c) }, c.text);
         return el;
       }
       case "TEXT_FIELD": {
@@ -514,7 +581,27 @@ export function runScreen(root, project, screen, store, opts) {
           readonly: bool(c, "readOnly") || !!prop(c, "formula").trim(), disabled: !enabled,
           type: { password: "password", email: "email", phone: "tel" }[type] || "text",
           inputmode: { number: "numeric", decimal: "decimal", phone: "tel", email: "email" }[type] || null,
-          oninput: e => { values[c.id] = e.target.value; recompute(); },
+          oninput: e => { values[c.id] = e.target.value; recompute(); suggest(); },
+          onblur: () => setTimeout(() => menu?.remove(), 200),
+        };
+        // Suggestions from the sheet while typing; picking one shows that record.
+        let menu = null;
+        const col = binds.find(([b]) => b === c)?.[1];
+        const suggest = async () => {
+          menu?.remove(); menu = null;
+          if (!bool(c, "suggest") || col == null || !store) return;
+          if (!state.sheetRows) { try { state.sheetRows = await store.rows(); } catch (e) { return; } }
+          const rows = state.sheetRows;
+          const shown = state.currentRow ? (rows[state.currentRow - 1] || [])[col] : null;
+          if (shown != null && normalize(shown) === normalize(values[c.id])) return;
+          const list = suggestions(rows, col, values[c.id]);
+          if (!list.length) return;
+          const r = input.getBoundingClientRect();
+          menu = h("div", { position: "fixed", left: r.left + "px", top: r.bottom + 4 + "px", minWidth: Math.max(r.width, 160) + "px", background: "#fff", color: "#183328",
+            borderRadius: "8px", boxShadow: "0 4px 14px #0004", zIndex: "40", overflow: "hidden", fontSize: "14px" }, { dir: lang === "en" ? "ltr" : "rtl" },
+            ...list.map(([n, text]) => h("div", { padding: "9px 12px", cursor: "pointer", borderBottom: "1px solid #eee" },
+              { onmousedown: e => { e.preventDefault(); menu?.remove(); menu = null; state.lastCriteria = null; showRow(rows, n); } }, text)));
+          document.body.append(menu);
         };
         const input = h(multiline ? "textarea" : "input",
           { ...style, width: "100%", height: "100%", border: "none", outline: "none", background: "transparent", resize: "none", padding: "0", fontFamily: style.fontFamily },
