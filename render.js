@@ -28,9 +28,110 @@ const BY_TYPE = {
   CHECKBOX: { backgroundColor: "#00FFFFFF", borderWidth: "0", checked: "false", checkColor: "#FF20B879", boxPosition: "start" },
   PHOTO: { hint: "اضغط لالتقاط صورة", imageFit: "contain", required: "false", textColor: "#FF607D8B", textAlign: "center", fontSize: "13", backgroundColor: "#FFFFFFFF", borderWidth: "1" },
   IMAGE: { imageData: "", imageFit: "contain", backgroundColor: "#00FFFFFF", borderWidth: "0" },
+  RADIO: { items: "خيار 1\nخيار 2", selectedIndex: "-1", radioLayout: "horizontal", checkColor: "#FF20B879", required: "false", backgroundColor: "#00FFFFFF", borderWidth: "0" },
+  TIME_PICKER: { timeFormat: "HH:mm", defaultNow: "false", backgroundColor: "#FFFFFFFF", borderWidth: "1" },
+  SIGNATURE: { hint: "اضغط للتوقيع", required: "false", textColor: "#FF607D8B", textAlign: "center", fontSize: "13", backgroundColor: "#FFFFFFFF", borderWidth: "1" },
+  LOCATION: { hint: "📍 تحديد الموقع", required: "false", textAlign: "center", backgroundColor: "#FFFFFFFF", borderWidth: "1" },
 };
 
-const INPUT_TYPES = new Set(["TEXT_FIELD", "DROPDOWN", "DATE_PICKER", "CHECKBOX", "PHOTO"]);
+const INPUT_TYPES = new Set(["TEXT_FIELD", "DROPDOWN", "DATE_PICKER", "CHECKBOX", "PHOTO", "RADIO", "TIME_PICKER", "SIGNATURE", "LOCATION"]);
+const PICTURE_TYPES = new Set(["PHOTO", "SIGNATURE"]);
+
+/** A list's options (see FormLogic.options): typed lines ("parent: option" when it depends on another list) or an Excel column. */
+export function listOptions(items, rows, column, parentColumn, parentValue) {
+  if (column != null) {
+    const data = (rows || []).slice(1);
+    const matching = parentValue == null || parentColumn == null ? data : data.filter(r => normalize(r[parentColumn] ?? "") === normalize(parentValue));
+    const seen = new Set();
+    return matching.map(r => String(r[column] ?? "").trim()).filter(v => v && !seen.has(normalize(v)) && seen.add(normalize(v)));
+  }
+  const lines = String(items || "").split("\n").map(s => s.trim()).filter(Boolean);
+  if (parentValue == null) return lines;
+  return lines.flatMap(line => {
+    const i = line.search(/[:：]/);
+    if (i < 0) return [line];
+    const option = line.slice(i + 1).trim();
+    return normalize(line.slice(0, i)) === normalize(parentValue) && option ? [option] : [];
+  });
+}
+
+/** The next serial number in a column (see FormLogic.nextNumber). */
+export function nextNumber(rows, column, prefix, digits) {
+  const p = normalize(prefix || "");
+  const re = new RegExp("^" + p.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "\\s*(\\d+)$");
+  let largest = 0;
+  for (const r of rows.slice(1)) { const m = re.exec(normalize(r[column] ?? "")); if (m) largest = Math.max(largest, Number(m[1])); }
+  return (prefix || "").trim() + String(largest + 1).padStart(Math.max(0, Math.min(12, digits || 0)), "0");
+}
+
+function formatTime(c, hours, minutes, lang) {
+  const p = n => String(n).padStart(2, "0");
+  if (prop(c, "timeFormat") === "HH:mm") return `${p(hours)}:${p(minutes)}`;
+  const am = hours < 12, h12 = hours % 12 || 12;
+  return `${p(h12)}:${p(minutes)} ` + (lang === "en" ? (am ? "AM" : "PM") : (am ? "ص" : "م"));
+}
+
+/** Reads a barcode or QR code with the camera (Chrome's BarcodeDetector). */
+async function scanBarcode(lang, toast) {
+  const t = (ar, en) => (lang === "en" ? en : ar);
+  if (!("BarcodeDetector" in window) || !navigator.mediaDevices?.getUserMedia) {
+    toast(t("هذا المتصفح لا يدعم مسح الباركود. استخدم Chrome على أندرويد أو تطبيق الجوال.", "This browser can't scan codes. Use Chrome on Android or the phone app."));
+    return null;
+  }
+  let stream;
+  try { stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } }); }
+  catch (e) { toast(t("لم يُسمح باستخدام الكاميرا.", "Camera access was not allowed.")); return null; }
+  return await new Promise(resolve => {
+    const video = h("video", { width: "100%", maxHeight: "70vh", borderRadius: "12px", background: "#000" }, { autoplay: true, playsinline: true, muted: true });
+    video.srcObject = stream;
+    let done = false;
+    const finish = value => { if (done) return; done = true; stream.getTracks().forEach(tr => tr.stop()); overlay.remove(); resolve(value); };
+    const overlay = h("div", { position: "fixed", inset: "0", background: "#000c", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: "12px", zIndex: "60", padding: "16px" }, {},
+      h("div", { color: "#fff" }, {}, t("وجّه الكاميرا إلى الباركود", "Point the camera at the code")), video,
+      h("button", { padding: "10px 20px", borderRadius: "10px", border: "0", fontSize: "15px" }, { onclick: () => finish(null) }, t("إلغاء", "Cancel")));
+    document.body.append(overlay);
+    const detector = new BarcodeDetector();
+    const tick = async () => {
+      if (done) return;
+      try { const codes = await detector.detect(video); if (codes.length && codes[0].rawValue) return finish(codes[0].rawValue); } catch (e) {}
+      setTimeout(tick, 250);
+    };
+    video.onloadeddata = tick;
+  });
+}
+
+/** A signature pad over the page; resolves with a JPEG (white background) or null. */
+function signaturePad(lang) {
+  const t = (ar, en) => (lang === "en" ? en : ar);
+  return new Promise(resolve => {
+    const canvas = h("canvas", { width: "100%", height: "240px", background: "#fff", borderRadius: "10px", touchAction: "none" });
+    const ctx = canvas.getContext("2d");
+    let drawing = false, drawn = false;
+    const setup = () => {
+      const r = canvas.getBoundingClientRect();
+      canvas.width = r.width; canvas.height = r.height;
+      ctx.fillStyle = "#fff"; ctx.fillRect(0, 0, canvas.width, canvas.height);
+      ctx.strokeStyle = "#10251F"; ctx.lineWidth = 3; ctx.lineCap = "round"; ctx.lineJoin = "round";
+    };
+    const at = e => { const r = canvas.getBoundingClientRect(); return [e.clientX - r.left, e.clientY - r.top]; };
+    canvas.onpointerdown = e => { drawing = true; canvas.setPointerCapture(e.pointerId); ctx.beginPath(); ctx.moveTo(...at(e)); };
+    canvas.onpointermove = e => { if (!drawing) return; ctx.lineTo(...at(e)); ctx.stroke(); drawn = true; };
+    canvas.onpointerup = () => { drawing = false; };
+    const close = v => { overlay.remove(); resolve(v); };
+    const btn = (label, fn, bg) => h("button", { padding: "10px 14px", borderRadius: "10px", border: "0", background: bg || "#e6e1e5", color: bg ? "#fff" : "#1d1b20", fontSize: "15px", cursor: "pointer" }, { onclick: fn }, label);
+    const overlay = h("div", { position: "fixed", inset: "0", background: "#0009", display: "flex", alignItems: "center", justifyContent: "center", zIndex: "60" }, { dir: lang === "en" ? "ltr" : "rtl" },
+      h("div", { background: "#172C24", color: "#fff", borderRadius: "14px", padding: "16px", width: "min(94vw, 520px)", display: "flex", flexDirection: "column", gap: "10px" }, {},
+        h("div", { fontWeight: "bold" }, {}, t("وقّع داخل المربع", "Sign inside the box")), canvas,
+        h("div", { display: "flex", gap: "8px", justifyContent: "flex-end" }, {},
+          btn(t("مسح", "Clear"), setup), btn(t("إلغاء", "Cancel"), () => close(null)),
+          btn(t("حفظ التوقيع", "Save"), () => {
+            if (!drawn) return close(null);
+            canvas.toBlob(async b => close(b ? new Uint8Array(await b.arrayBuffer()) : null), "image/jpeg", 0.85);
+          }, "#20B879"))));
+    document.body.append(overlay);
+    setup();
+  });
+}
 const PHOTO_NAME = /^IMG_\d{8}_\d{6}_[0-9a-f]{4}\.jpg$/;
 export const isPhoto = v => PHOTO_NAME.test(String(v || "").trim());
 const FIT = { contain: "contain", cover: "cover", stretch: "fill" };
@@ -261,7 +362,9 @@ function today() {
 
 function startValue(c, lang) {
   switch (c.type) {
-    case "TEXT_FIELD": return c.text || "";
+    case "TEXT_FIELD": return bool(c, "autoNumber") ? "" : c.text || "";
+    case "RADIO": return listOptions(prop(c, "items"))[Math.trunc(num(c, "selectedIndex"))] ?? "";
+    case "TIME_PICKER": { if (!bool(c, "defaultNow")) return ""; const d = new Date(); return formatTime(c, d.getHours(), d.getMinutes(), lang); }
     case "DROPDOWN": {
       const items = prop(c, "items").split("\n").filter(s => s.trim());
       return items[Math.trunc(num(c, "selectedIndex"))] ?? "";
@@ -349,7 +452,9 @@ export function runScreen(root, project, screen, store, opts) {
   const recompute = () => {
     computed = computeFormulas(screen, c => (c.type === "LABEL" ? c.text : values[c.id] ?? ""));
     for (const [id, show] of Object.entries(formulaShown)) show(computed[id] ?? "");
+    refreshShownLater();
   };
+  let refreshShownLater = () => {};
   const state = { currentRow: null, lastCriteria: null, filledSnapshot: null, sheetRows: null, working: false };
   const inputs = {}; // component id -> function(value) updating its element
   const tables = [];
@@ -358,9 +463,35 @@ export function runScreen(root, project, screen, store, opts) {
     const v = computed[c.id] ?? values[c.id] ?? "";
     return c.type === "CHECKBOX" ? (v === "true" ? t("نعم", "Yes") : t("لا", "No")) : v;
   };
-  const formValues = () => Object.fromEntries(binds.map(([c, col]) => [col, toExcel(c)]));
+  // "Show only when" conditions; hidden fields save nothing.
+  const byName = name => name && screen.components.find(o => normalize(o.name) === normalize(name));
+  const isShown = c => {
+    const source = byName(prop(c, "showIfField"));
+    if (!source) return true;
+    const wanted = prop(c, "showIfValues").split(/[,،]/).map(normalize).filter(Boolean);
+    const actual = normalize(source.type === "LABEL" ? source.text : toExcel(source));
+    return wanted.length ? wanted.includes(actual) : actual !== "";
+  };
+  const boxes = {}; // component id -> its positioned box
+  const refreshShown = () => { for (const c of screen.components) if (boxes[c.id]) boxes[c.id].style.display = isShown(c) ? "" : "none"; };
+  const formValues = () => Object.fromEntries(binds.map(([c, col]) => [col, isShown(c) ? toExcel(c) : ""]));
+  const optionRefreshers = {}; // list id -> redraws its options
+  const colOf = name => { const i = headers.findIndex(x => normalize(x) === normalize(name)); return i < 0 ? null : i; };
+  const optionsFor = c => {
+    const parent = byName(prop(c, "parentField"));
+    return listOptions(prop(c, "items"), state.sheetRows, prop(c, "optionsColumn") ? colOf(prop(c, "optionsColumn")) : null,
+      parent ? binds.find(([b]) => b === parent)?.[1] ?? null : null, parent ? toExcel(parent) : null);
+  };
   const sameForm = (a, b) => a && b && JSON.stringify(a) === JSON.stringify(b);
-  const setValue = (c, v) => { values[c.id] = v; inputs[c.id]?.(v); recompute(); };
+  const setValue = (c, v) => {
+    values[c.id] = v; inputs[c.id]?.(v); recompute();
+    // Lists that depend on this one show matching options and drop a choice that no longer fits.
+    for (const child of screen.components) {
+      if (byName(prop(child, "parentField")) !== c) continue;
+      optionRefreshers[child.id]?.();
+      if (values[child.id] && !optionsFor(child).includes(values[child.id])) setValue(child, "");
+    }
+  };
   const fill = row => {
     for (const [c, col] of binds) {
       const cell = row[col] ?? "";
@@ -372,13 +503,19 @@ export function runScreen(root, project, screen, store, opts) {
     state.currentRow = null; state.filledSnapshot = null;
   };
   const missingRequired = () => binds
-    .filter(([c]) => (c.type === "TEXT_FIELD" || c.type === "PHOTO") && bool(c, "required") && !(values[c.id] || "").trim())
+    .filter(([c]) => ["TEXT_FIELD", "PHOTO", "RADIO", "SIGNATURE", "LOCATION"].includes(c.type) && bool(c, "required") && !bool(c, "autoNumber")
+      && !(values[c.id] || "").trim() && isShown(c))
     .map(([c, col]) => headers[col] || c.name);
 
   async function reloadTables() {
     if (!store) return;
-    if (!tables.length) { state.sheetRows = null; return; } // suggestions read the sheet again when needed
-    try { state.sheetRows = await store.rows(); tables.forEach(draw => draw()); } catch (e) { toast(opts.errorText(e)); }
+    const listsFromSheet = screen.components.some(c => prop(c, "optionsColumn") || prop(c, "scan") === "record");
+    if (!tables.length && !listsFromSheet) { state.sheetRows = null; return; } // suggestions read the sheet again when needed
+    try {
+      state.sheetRows = await store.rows();
+      tables.forEach(draw => draw());
+      Object.values(optionRefreshers).forEach(redraw => redraw());
+    } catch (e) { toast(opts.errorText(e)); }
   }
 
   /** What a search button looks for (see FormLogic.searchCriteria). */
@@ -391,7 +528,7 @@ export function runScreen(root, project, screen, store, opts) {
       const hit = binds.find(([c]) => normalize(c.name) === normalize(field));
       return hit && String(valueOf(hit[0])).trim() ? { [hit[1]]: valueOf(hit[0]) } : {};
     }
-    return Object.fromEntries(binds.filter(([c, col]) => c.type !== "CHECKBOX" && c.type !== "PHOTO" && !prop(c, "formula").trim() &&
+    return Object.fromEntries(binds.filter(([c, col]) => c.type !== "CHECKBOX" && !PICTURE_TYPES.has(c.type) && c.type !== "LOCATION" && !prop(c, "formula").trim() &&
       String(valueOf(c)).trim() && normalize(valueOf(c)) !== normalize(startOf(c, col))).map(([c, col]) => [col, valueOf(c)]));
   }
 
@@ -440,11 +577,17 @@ export function runScreen(root, project, screen, store, opts) {
       if (action === "addRow") {
         const missing = missingRequired();
         if (missing.length) return toast(t("املأ الحقول المطلوبة: ", "Fill in the required fields: ") + missing.join("، "));
-        const form = formValues();
-        if (Object.values(form).every(v => !String(v).trim())) return toast(t("الحقول فارغة.", "The fields are empty."));
-        const row = await store.append(form);
+        if (Object.values(formValues()).every(v => !String(v).trim())) return toast(t("الحقول فارغة.", "The fields are empty."));
+        // Serial numbers: one more than the largest already in the column.
+        const numbered = binds.filter(([c]) => bool(c, "autoNumber") && !(values[c.id] || "").trim());
+        const assigned = [];
+        if (numbered.length) {
+          const rows = await store.rows();
+          for (const [c, col] of numbered) { const next = nextNumber(rows, col, prop(c, "autoPrefix"), Math.trunc(num(c, "autoDigits"))); setValue(c, next); assigned.push(next); }
+        }
+        const row = await store.append(formValues());
         clearForm();
-        toast(t(`تمت إضافة الصف رقم ${row} ✓`, `Row ${row} added ✓`));
+        toast(t(`تمت إضافة الصف رقم ${row} ✓`, `Row ${row} added ✓`) + (assigned.length ? " — " + assigned.join("، ") : ""));
       } else if (action === "search") {
         const field = button ? prop(button, "searchField") : "";
         const mode = (button && prop(button, "matchMode")) || "exact";
@@ -518,7 +661,7 @@ export function runScreen(root, project, screen, store, opts) {
   }
 
   async function recordReport() {
-    const fields = screen.components.filter(c => INPUT_TYPES.has(c.type)).sort((a, b) => a.y - b.y || a.x - b.x);
+    const fields = screen.components.filter(c => INPUT_TYPES.has(c.type) && isShown(c)).sort((a, b) => a.y - b.y || a.x - b.x);
     if (fields.every(c => c.type === "CHECKBOX" || !(values[c.id] || "").trim())) {
       return toast(t("النموذج فارغ. املأ الحقول أو ابحث عن سجل ثم أنشئ التقرير.", "The form is empty. Fill it in or search for a record first."));
     }
@@ -528,7 +671,7 @@ export function runScreen(root, project, screen, store, opts) {
     const rows = [];
     for (const c of [...fields, ...results]) {
       let cell;
-      if (c.type === "PHOTO") {
+      if (PICTURE_TYPES.has(c.type)) {
         const url = values[c.id] && store?.loadPhoto ? await store.loadPhoto(values[c.id]).catch(() => null) : null;
         cell = url ? `<img src="${url}">` : t("(لا توجد صورة)", "(no photo)");
       } else cell = esc(toExcel(c) || "—");
@@ -582,8 +725,11 @@ export function runScreen(root, project, screen, store, opts) {
       transform: `rotate(${num(c, "rotation")}deg)`,
     }, { dir: lang === "en" ? "ltr" : "rtl" });
     box.append(drawComponent(c));
+    boxes[c.id] = box;
     page.append(box);
   }
+  refreshShown();
+  refreshShownLater = refreshShown;
 
   function drawComponent(c) {
     const style = textStyle(c);
@@ -608,9 +754,9 @@ export function runScreen(root, project, screen, store, opts) {
         const multiline = type === "multiline";
         const required = bool(c, "required");
         const attrs = {
-          placeholder: prop(c, "hint") + (required ? " *" : ""),
+          placeholder: bool(c, "autoNumber") ? t("رقم تلقائي عند الحفظ", "Numbered on save") : prop(c, "hint") + (required ? " *" : ""),
           maxlength: num(c, "maxLength") > 0 ? Math.trunc(num(c, "maxLength")) : null,
-          readonly: bool(c, "readOnly") || !!prop(c, "formula").trim(), disabled: !enabled,
+          readonly: bool(c, "readOnly") || bool(c, "autoNumber") || !!prop(c, "formula").trim(), disabled: !enabled,
           type: { password: "password", email: "email", phone: "tel" }[type] || "text",
           inputmode: { number: "numeric", decimal: "decimal", phone: "tel", email: "email" }[type] || null,
           oninput: e => { values[c.id] = e.target.value; recompute(); suggest(); },
@@ -653,18 +799,37 @@ export function runScreen(root, project, screen, store, opts) {
         el.style.setProperty("--hint", cssColor(prop(c, "hintColor")));
         input.classList.add("hinted");
         el.append(input);
+        const scanMode = prop(c, "scan");
+        if (scanMode === "fill" || scanMode === "record") {
+          el.append(h("button", { flex: "0 0 auto", border: "0", background: "transparent", fontSize: "20px", cursor: "pointer", padding: "0 4px" },
+            { title: t("مسح باركود", "Scan code"), disabled: !enabled, onclick: async () => {
+              const code = await scanBarcode(lang, toast);
+              if (!code) return;
+              setValue(c, code);
+              const column = binds.find(([b]) => b === c)?.[1];
+              if (scanMode !== "record" || column == null || !store) return;
+              try {
+                const rows = state.sheetRows || await store.rows();
+                state.sheetRows = rows;
+                const found = searchAll(rows, { [column]: code });
+                if (!found.length) toast(t(`لا يوجد سجل بهذا الرمز: ${code}`, `No record has this code: ${code}`));
+                else if (found.length === 1) showRow(rows, found[0]);
+                else pickResult(rows, found);
+              } catch (e) { toast(opts.errorText(e)); }
+            } }, "▦"));
+        }
         return el;
       }
       case "DROPDOWN": {
-        const items = prop(c, "items").split("\n").filter(s => s.trim());
+        let items = optionsFor(c);
         const select = h("select", { ...style, width: "100%", height: "100%", border: "none", background: "transparent", outline: "none" },
-          { disabled: !enabled, onchange: e => { values[c.id] = e.target.value; recompute(); } },
-          h("option", {}, { value: "" }, prop(c, "hint")),
-          items.map(item => h("option", {}, { value: item }, item)));
+          { disabled: !enabled, onchange: e => setValue(c, e.target.value) });
         const sync = v => {
+          select.replaceChildren(h("option", {}, { value: "" }, prop(c, "hint")), ...items.map(item => h("option", {}, { value: item }, item)));
           if (v && !items.includes(v)) select.append(h("option", {}, { value: v }, v));
-          select.value = v;
+          select.value = v || "";
         };
+        optionRefreshers[c.id] = () => { items = optionsFor(c); sync(values[c.id]); };
         sync(values[c.id]);
         inputs[c.id] = sync;
         const el = frame();
@@ -681,17 +846,85 @@ export function runScreen(root, project, screen, store, opts) {
           onchange: e => {
             if (!e.target.value) return;
             const [y, m, d] = e.target.value.split("-").map(Number);
-            values[c.id] = formatDate(c, new Date(Date.UTC(y, m - 1, d)), lang);
-            show(values[c.id]);
+            setValue(c, formatDate(c, new Date(Date.UTC(y, m - 1, d)), lang));
           },
         });
         const el = frame({ position: "relative", gap: "6px" });
         el.append(label, h("span", { ...style, flex: "0" }, {}, "📅"), picker);
         return el;
       }
+      case "RADIO": {
+        const el = frame({ flexDirection: prop(c, "radioLayout") === "vertical" ? "column" : "row", alignItems: prop(c, "radioLayout") === "vertical" ? "stretch" : "center", gap: "10px", flexWrap: "wrap" });
+        const group = "r" + c.id;
+        const draw = () => {
+          el.replaceChildren(...(optionsFor(c).length ? optionsFor(c) : ["—"]).map(option => {
+            const input = h("input", { accentColor: cssColor(prop(c, "checkColor")), width: "18px", height: "18px", margin: "0" },
+              { type: "radio", name: group, value: option, disabled: !enabled, onchange: () => setValue(c, option) });
+            input.checked = values[c.id] === option;
+            return h("label", { display: "flex", alignItems: "center", gap: "6px", cursor: "pointer" }, {}, input, h("span", style, { dir: "auto" }, option));
+          }));
+        };
+        optionRefreshers[c.id] = draw;
+        inputs[c.id] = draw;
+        draw();
+        return el;
+      }
+      case "TIME_PICKER": {
+        const label = h("span", { ...style, flex: "1", whiteSpace: "nowrap" }, { dir: "ltr" });
+        const show = v => { label.textContent = v || "--:--"; label.style.opacity = v ? "1" : ".55"; };
+        show(values[c.id]);
+        inputs[c.id] = show;
+        const picker = h("input", { position: "absolute", inset: "0", opacity: "0", width: "100%", height: "100%", cursor: "pointer" }, {
+          type: "time", disabled: !enabled,
+          onchange: e => { if (!e.target.value) return; const [hh, mm] = e.target.value.split(":").map(Number); setValue(c, formatTime(c, hh, mm, lang)); },
+        });
+        const el = frame({ position: "relative", gap: "6px" });
+        el.append(label, h("span", { ...style, flex: "0" }, {}, "🕒"), picker);
+        return el;
+      }
+      case "SIGNATURE": {
+        const el = frame({ justifyContent: "center", overflow: "hidden", cursor: enabled ? "pointer" : "default", flexDirection: "column" });
+        const show = async v => {
+          el.replaceChildren();
+          if (!v) { el.append(h("div", { fontSize: "26px" }, {}, "✍️"), h("div", { ...style, textAlign: "center" }, {}, prop(c, "hint") + (bool(c, "required") ? " *" : ""))); return; }
+          const url = store?.loadPhoto ? await store.loadPhoto(v).catch(() => null) : null;
+          if (values[c.id] !== v) return;
+          el.append(url ? h("img", { width: "100%", height: "100%", objectFit: "contain" }, { src: url, alt: c.name }) : h("div", style, {}, t("التوقيع غير متاح", "Signature not available")));
+        };
+        el.onclick = async () => {
+          if (!enabled) return;
+          if (!store?.savePhoto) return toast(t("حفظ التوقيع يحتاج تطبيقًا مرتبطًا ببيانات.", "Saving a signature needs an app with data."));
+          const jpeg = await signaturePad(lang);
+          if (!jpeg) return;
+          try { const name = photoName(); await store.savePhoto(name, jpeg); setValue(c, name); } catch (e) { toast(opts.errorText(e)); }
+        };
+        inputs[c.id] = show;
+        show(values[c.id]);
+        return el;
+      }
+      case "LOCATION": {
+        const el = frame({ justifyContent: "center", gap: "6px", cursor: enabled ? "pointer" : "default", position: "relative" });
+        const show = v => {
+          el.replaceChildren(h("span", { ...style }, { dir: "auto" }, v || prop(c, "hint") + (bool(c, "required") ? " *" : "")));
+          if (v) el.append(h("a", { position: "absolute", insetInlineEnd: "6px", textDecoration: "none" },
+            { href: "https://maps.google.com/?q=" + encodeURIComponent(v.replace(/\s/g, "")), target: "_blank", onclick: e => e.stopPropagation() }, "🗺️"));
+        };
+        el.onclick = () => {
+          if (!enabled) return;
+          if (!navigator.geolocation) return toast(t("هذا المتصفح لا يدعم تحديد الموقع.", "This browser can't get the location."));
+          el.style.opacity = ".6";
+          navigator.geolocation.getCurrentPosition(
+            pos => { el.style.opacity = "1"; setValue(c, pos.coords.latitude.toFixed(6) + ", " + pos.coords.longitude.toFixed(6)); },
+            () => { el.style.opacity = "1"; toast(t("تعذّر تحديد الموقع. اسمح بالوصول للموقع وشغّل GPS.", "Couldn't get the location. Allow location access and turn on GPS.")); },
+            { enableHighAccuracy: true, timeout: 20000 });
+        };
+        inputs[c.id] = show;
+        show(values[c.id]);
+        return el;
+      }
       case "CHECKBOX": {
         const box = h("input", { width: "20px", height: "20px", accentColor: cssColor(prop(c, "checkColor")), flex: "0 0 auto", margin: "0" },
-          { type: "checkbox", disabled: !enabled, onchange: e => { values[c.id] = String(e.target.checked); recompute(); } });
+          { type: "checkbox", disabled: !enabled, onchange: e => setValue(c, String(e.target.checked)) });
         box.checked = values[c.id] === "true";
         inputs[c.id] = v => { box.checked = v === "true"; };
         const text = h("span", { ...style, flex: "1" }, { dir: "auto" }, c.text);
