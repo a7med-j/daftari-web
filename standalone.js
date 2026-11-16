@@ -49,6 +49,27 @@ export async function runStandalone(CONFIG, ICON) {
   menuBtn.onclick = () => { menu.style.display = menu.style.display === "block" ? "none" : "block"; };
   document.addEventListener("click", e => { if (e.target !== menuBtn && !menu.contains(e.target)) menu.style.display = "none"; });
 
+  // A file opened from a phone's storage runs with no web address: the browser gives it no storage
+  // and Firebase can't sign in. Then the app's link (when it has one) is the way to open it.
+  const fromFile = !/^https?:$/.test(location.protocol);
+  const storageWorks = () => new Promise(resolve => {
+    try {
+      const req = indexedDB.open("waraqa-check");
+      req.onsuccess = () => { req.result.close(); resolve(true); };
+      req.onerror = req.onblocked = () => resolve(false);
+      setTimeout(() => resolve(false), 3000);
+    } catch (e) { resolve(false); }
+  });
+  if (fromFile && (CONFIG.mode === "cloud" || !(await storageWorks()))) {
+    stage.replaceChildren(node("div", { class: "center" },
+      node("img", { src: ICON, alt: "" }), node("h2", {}, CONFIG.name),
+      node("p", { class: "muted" }, CONFIG.mode === "cloud"
+        ? t("هذا التطبيق مشترك ويحتاج تسجيل الدخول، وهذا لا يعمل من ملف على الجهاز. افتحه من رابطه:", "This shared app needs sign-in, which doesn't work from a file on the device. Open it from its link:")
+        : t("المتصفح لا يسمح لهذا الملف بحفظ البيانات على هذا الجهاز. افتحه من رابطه:", "The browser won't let this file save data on this device. Open it from its link:")),
+      CONFIG.link ? node("a", { class: "btn", href: CONFIG.link, style: "text-decoration:none" }, t("افتح التطبيق", "Open the app")) : null));
+    return;
+  }
+
   const project = JSON.parse(CONFIG.projectJson);
   const start = store => runApp(stage, project, store, {
     lang, t, toast, confirm: confirmBox, errorText,
