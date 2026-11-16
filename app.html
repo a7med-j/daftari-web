@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#10251F">
+<title>ورقة</title>
+<link rel="icon" id="icon" href="icon.svg">
+<link rel="apple-touch-icon" id="touchIcon" href="icon-192.png">
+<style>
+:root { --ink: #10251F; --panel: #172C24; --green: #20B879; --muted: #b9d9c9; }
+* { box-sizing: border-box; }
+html, body { margin: 0; min-height: 100%; background: var(--ink); color: #fff; font-family: system-ui, -apple-system, "Segoe UI", Tahoma, sans-serif; }
+.hinted::placeholder { color: var(--hint, #8a9a92); opacity: 1; }
+#stage { width: 100%; min-height: 100vh; }
+.center { max-width: 420px; margin: 0 auto; padding: 32px 20px; display: flex; flex-direction: column; gap: 12px; text-align: center; }
+.center img { width: 88px; height: 88px; align-self: center; border-radius: 22px; }
+.center input { width: 100%; padding: 12px; border-radius: 10px; border: 1px solid #4f6b5f; background: #0b1c16; color: #fff; font-size: 16px; }
+.btn { padding: 12px 18px; border: 0; border-radius: 12px; background: var(--green); color: #fff; font: inherit; font-weight: 700; font-size: 16px; cursor: pointer; }
+.btn:disabled { opacity: .6; }
+.lnk { background: none; border: 0; color: var(--green); cursor: pointer; font: inherit; padding: 6px; }
+.muted { color: var(--muted); }
+#menuBtn { position: fixed; top: 10px; inset-inline-start: 10px; z-index: 30; width: 38px; height: 38px; border: 0; border-radius: 50%;
+  background: rgba(16,37,31,.8); color: #fff; font-size: 20px; cursor: pointer; display: none; }
+#menu { position: fixed; top: 54px; inset-inline-start: 10px; z-index: 31; background: #fff; color: #183328; border-radius: 10px;
+  box-shadow: 0 6px 18px rgba(0,0,0,.3); overflow: hidden; display: none; min-width: 210px; }
+#menu button { display: block; width: 100%; text-align: start; padding: 12px 16px; border: 0; background: none; font: inherit; cursor: pointer; }
+#menu button:hover { background: #eef5f1; }
+#toast { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%) translateY(150%); max-width: 92vw; background: #e6e1e5;
+  color: #1d1b20; padding: 14px 18px; border-radius: 10px; box-shadow: 0 4px 14px rgba(0,0,0,.3); transition: transform .25s; z-index: 60; }
+#toast.show { transform: translateX(-50%) translateY(0); }
+</style>
+</head>
+<body>
+<button id="menuBtn" aria-label="menu">⋮</button>
+<div id="menu"></div>
+<div id="stage"><div class="center"><h2></h2><p class="muted">…</p></div></div>
+<div id="toast"></div>
+<script type="module">
+// A web app exported from Waraqa, opened by its link: app.html?id=<project id>. Its design, name and
+// icon are public (webApps/{id}); its data stays in this browser or behind sign-in on the cloud table.
+import { runStandalone } from "./standalone.js";
+import { firebaseConfig } from "./config.js";
+
+const stage = document.getElementById("stage");
+const say = (ar, en) => { stage.querySelector("p").textContent = navigator.language.startsWith("en") ? en : ar; };
+const id = new URLSearchParams(location.search).get("id");
+const value = v => v == null ? null : "stringValue" in v ? v.stringValue : "arrayValue" in v ? (v.arrayValue.values || []).map(value) : null;
+try {
+  if (!id || !/^[\w-]{1,80}$/.test(id)) throw new Error("bad id");
+  const url = `https://firestore.googleapis.com/v1/projects/${firebaseConfig.projectId}/databases/(default)/documents/webApps/${id}?key=${firebaseConfig.apiKey}`;
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(String(res.status));
+  const f = (await res.json()).fields || {};
+  const config = {
+    name: value(f.name) || "", mode: value(f.mode) || "personal", projectJson: value(f.json) || "{}",
+    appId: value(f.appId) || "", shareCode: value(f.shareCode) || "", id, headers: value(f.headers) || [],
+  };
+  const english = value(f.lang) === "en";
+  document.documentElement.lang = english ? "en" : "ar";
+  document.documentElement.dir = english ? "ltr" : "rtl";
+  document.title = config.name;
+  const icon = value(f.icon) || "icon-192.png";
+  document.getElementById("icon").href = icon;
+  document.getElementById("touchIcon").href = icon;
+  runStandalone(config, icon);
+} catch (e) {
+  say("لم يُعثر على هذا التطبيق. تأكد من الرابط أو اطلب رابطًا جديدًا من صاحبه.", "This app wasn't found. Check the link or ask its owner for a new one.");
+}
+</script>
+</body>
+</html>
