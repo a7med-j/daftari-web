@@ -1,6 +1,6 @@
-# دفتري على الويب — Daftari Web
+# ورقة على الويب — Waraqa Web
 
-The browser version of [Daftari](https://github.com/a7med-j/appforge-studio): sign in, open apps you
+The browser version of [Waraqa](https://github.com/a7med-j/appforge-studio): sign in, open apps you
 published or joined, and run them on their shared table. It uses the same Firebase project as the
 Android app; access is controlled by Firebase Authentication and the Firestore security rules.
 

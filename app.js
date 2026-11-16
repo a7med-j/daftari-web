@@ -1,4 +1,4 @@
-// Daftari on the web: sign in, open apps you own or joined (or join with a code from a link),
+// Waraqa (formerly Daftari) on the web: sign in, open apps you own or joined (or join with a code from a link),
 // and run them on their shared table. Same Firebase project and data as the Android app.
 
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-app.js";
@@ -23,7 +23,7 @@ const t = (ar, en) => (lang === "en" ? en : ar);
 function applyLang() {
   document.documentElement.lang = lang;
   document.documentElement.dir = lang === "en" ? "ltr" : "rtl";
-  document.title = t("دفتري", "Daftari");
+  document.title = t("ورقة", "Waraqa");
 }
 applyLang();
 
@@ -173,7 +173,7 @@ async function join(user, code) {
 // ---- Views ----
 function header(user) {
   return el("header", {},
-    el("div", { class: "brand" }, el("span", { class: "logo" }, "▦"), el("b", {}, t("دفتري", "Daftari"))),
+    el("div", { class: "brand" }, el("img", { class: "logo", src: "icon.svg", alt: "" }), el("b", {}, t("ورقة", "Waraqa"))),
     el("div", { class: "spacer" }),
     el("button", { class: "link", onclick: () => { lang = lang === "en" ? "ar" : "en"; localStorage.setItem("lang", lang); applyLang(); route(); } }, lang === "en" ? "العربية" : "English"),
     user ? el("button", { class: "link", onclick: () => signOut(auth) }, t("خروج", "Sign out")) : null,

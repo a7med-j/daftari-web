@@ -1,1 +1,28 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 96 96"><rect width="96" height="96" rx="22" fill="#20B879"/><g fill="#fff"><rect x="22" y="24" width="52" height="10" rx="2"/><rect x="22" y="40" width="22" height="10" rx="2"/><rect x="52" y="40" width="22" height="10" rx="2"/><rect x="22" y="56" width="22" height="10" rx="2"/><rect x="52" y="56" width="22" height="10" rx="2"/></g></svg>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#2BC48A"/>
+      <stop offset="1" stop-color="#0E5A3A"/>
+    </linearGradient>
+    <linearGradient id="fold" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#DCEFE6"/>
+      <stop offset="1" stop-color="#A9D4C0"/>
+    </linearGradient>
+    <filter id="sh" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="10" stdDeviation="12" flood-color="#06301F" flood-opacity="0.35"/>
+    </filter>
+  </defs>
+  <rect width="512" height="512" rx="112" fill="url(#bg)"/>
+  <g filter="url(#sh)">
+    <path d="M140 92 H318 L382 156 V404 Q382 420 366 420 H156 Q140 420 140 404 Z" fill="#FFFFFF"/>
+    <path d="M318 92 V140 Q318 156 334 156 H382 Z" fill="url(#fold)"/>
+  </g>
+  <rect x="176" y="176" width="170" height="36" rx="8" fill="#20B879"/>
+  <g fill="#E3F2EB">
+    <rect x="176" y="228" width="68" height="30" rx="6"/><rect x="254" y="228" width="92" height="30" rx="6"/>
+    <rect x="176" y="270" width="68" height="30" rx="6"/><rect x="254" y="270" width="92" height="30" rx="6"/>
+    <rect x="176" y="312" width="68" height="30" rx="6"/><rect x="254" y="312" width="92" height="30" rx="6"/>
+  </g>
+  <circle cx="356" cy="372" r="58" fill="#FFB020" stroke="#FFFFFF" stroke-width="12"/>
+  <path d="M332 372 L350 390 L384 354" fill="none" stroke="#FFFFFF" stroke-width="16" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>
