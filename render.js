@@ -56,6 +56,30 @@ export function listOptions(items, rows, column, parentColumn, parentValue) {
 }
 
 /** The next serial number in a column (see FormLogic.nextNumber). */
+/** Data rows (Excel numbers) whose column equals one of the comma-separated values (all rows without a column). */
+export function rowsWhere(rows, column, wanted) {
+  const values = String(wanted || "").split(/[,،]/).map(normalize).filter(Boolean);
+  const out = [];
+  for (let n = 2; n <= rows.length; n++) {
+    const row = rows[n - 1] || [];
+    if (row.some(v => String(v).trim()) && (column == null || !values.length || values.includes(normalize(row[column] ?? "")))) out.push(n);
+  }
+  return out;
+}
+
+/** A label's statistic (see FormLogic.statistic). */
+export function statistic(rows, numbers, kind, column) {
+  if (kind === "count") return String(numbers.length);
+  if (column == null) return "؟";
+  const nums = numbers.map(n => normalize(rows[n - 1][column] ?? "").replace(/,/g, "")).filter(v => v !== "" && Number.isFinite(Number(v))).map(Number);
+  if (kind === "sum") return formatNumber(nums.reduce((a, b) => a + b, 0));
+  if (kind === "average") return formatNumber(nums.length ? nums.reduce((a, b) => a + b, 0) / nums.length : 0);
+  if (kind === "max") return nums.length ? formatNumber(Math.max(...nums)) : "—";
+  if (kind === "min") return nums.length ? formatNumber(Math.min(...nums)) : "—";
+  return "";
+}
+const withStatistic = (text, value) => (text.includes("{}") ? text.replaceAll("{}", value) : text.trim() ? text + " " + value : value);
+
 export function nextNumber(rows, column, prefix, digits) {
   const p = normalize(prefix || "");
   const re = new RegExp("^" + p.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "\\s*(\\d+)$");
@@ -476,6 +500,7 @@ export function runScreen(root, project, screen, store, opts) {
   const refreshShown = () => { for (const c of screen.components) if (boxes[c.id]) boxes[c.id].style.display = isShown(c) ? "" : "none"; };
   const formValues = () => Object.fromEntries(binds.map(([c, col]) => [col, isShown(c) ? toExcel(c) : ""]));
   const optionRefreshers = {}; // list id -> redraws its options
+  const statLabels = []; // labels showing a statistic of the sheet
   const colOf = name => { const i = headers.findIndex(x => normalize(x) === normalize(name)); return i < 0 ? null : i; };
   const optionsFor = c => {
     const parent = byName(prop(c, "parentField"));
@@ -485,6 +510,7 @@ export function runScreen(root, project, screen, store, opts) {
   const sameForm = (a, b) => a && b && JSON.stringify(a) === JSON.stringify(b);
   const setValue = (c, v) => {
     values[c.id] = v; inputs[c.id]?.(v); recompute();
+    if (screen.components.some(o => o.type === "TABLE" && normalize(prop(o, "filterField")) === normalize(c.name))) tables.forEach(draw => draw());
     // Lists that depend on this one show matching options and drop a choice that no longer fits.
     for (const child of screen.components) {
       if (byName(prop(child, "parentField")) !== c) continue;
@@ -509,12 +535,13 @@ export function runScreen(root, project, screen, store, opts) {
 
   async function reloadTables() {
     if (!store) return;
-    const listsFromSheet = screen.components.some(c => prop(c, "optionsColumn") || prop(c, "scan") === "record");
+    const listsFromSheet = screen.components.some(c => prop(c, "optionsColumn") || prop(c, "scan") === "record" || (c.type === "LABEL" && prop(c, "stat")));
     if (!tables.length && !listsFromSheet) { state.sheetRows = null; return; } // suggestions read the sheet again when needed
     try {
       state.sheetRows = await store.rows();
       tables.forEach(draw => draw());
       Object.values(optionRefreshers).forEach(redraw => redraw());
+      statLabels.forEach(update => update());
     } catch (e) { toast(opts.errorText(e)); }
   }
 
@@ -540,6 +567,17 @@ export function runScreen(root, project, screen, store, opts) {
   }
 
   /** Several rows matched: a list to pick one from. */
+  /** Shows a found row here, or on the button's screen ("show the result in"), filling that screen's fields. */
+  function openRecord(rows, n, targetName) {
+    const target = targetName && project.screens.find(s => s.name === targetName);
+    if (!target || target.id === screen.id || !opts.openScreen) return showRow(rows, n);
+    for (const [c, col] of bindings(target, headers)) {
+      const cell = rows[n - 1][col] ?? "";
+      values[c.id] = c.type === "CHECKBOX" ? String(TRUTHY.has(normalize(cell))) : cell;
+    }
+    opts.openScreen(target.name, n);
+  }
+
   function pickResult(rows, found) {
     const order = screen.components.filter(c => INPUT_TYPES.has(c.type)).sort((a, b) => a.y - b.y || a.x - b.x)
       .map(c => binds.find(([b]) => b === c)?.[1]).filter(col => col != null);
@@ -547,7 +585,7 @@ export function runScreen(root, project, screen, store, opts) {
     const list = h("div", { overflow: "auto", maxHeight: "60vh" });
     for (const n of found.slice(0, 300)) {
       const row = rows[n - 1];
-      list.append(h("div", { padding: "10px 4px", borderBottom: "1px solid #2C4A3D", cursor: "pointer" }, { onclick: () => { close(); showRow(rows, n); } },
+      list.append(h("div", { padding: "10px 4px", borderBottom: "1px solid #2C4A3D", cursor: "pointer" }, { onclick: () => { close(); openRecord(rows, n, state.resultsTarget); } },
         h("div", {}, {}, order.map(col => row[col] ?? "").filter(v => String(v).trim()).slice(0, 4).join(" • ")),
         h("div", { fontSize: "11px", color: "#8a9a92" }, {}, t(`الصف ${n}`, `Row ${n}`))));
     }
@@ -593,6 +631,7 @@ export function runScreen(root, project, screen, store, opts) {
         const mode = (button && prop(button, "matchMode")) || "exact";
         const again = state.currentRow != null && sameForm(formValues(), state.filledSnapshot) && state.lastCriteria;
         const criteria = again ? state.lastCriteria : searchCriteria(field);
+        state.resultsTarget = button ? prop(button, "targetScreen") : "";
         if (!Object.keys(criteria).length) {
           return toast(field ? t(`اكتب قيمة في حقل «${field}» ثم اضغط بحث.`, `Type a value in "${field}", then search.`)
             : t("اكتب قيمة في حقل أو أكثر ثم اضغط بحث.", "Type a value in one or more fields, then search."));
@@ -602,7 +641,7 @@ export function runScreen(root, project, screen, store, opts) {
         state.lastCriteria = criteria;
         const found = searchAll(rows, criteria, mode);
         if (!found.length) toast(t("لا توجد نتيجة مطابقة.", "No matching row."));
-        else if (found.length === 1) showRow(rows, found[0]);
+        else if (found.length === 1) openRecord(rows, found[0], state.resultsTarget);
         else pickResult(rows, found);
       } else if (action === "updateRow") {
         const row = state.currentRow;
@@ -741,6 +780,17 @@ export function runScreen(root, project, screen, store, opts) {
         const el = frame({ justifyContent: justify(prop(c, "textAlign")) });
         const text = h("div", { ...style, width: "100%", whiteSpace: "pre-wrap", ...(max > 0 ? { display: "-webkit-box", WebkitLineClamp: String(max), WebkitBoxOrient: "vertical", overflow: "hidden" } : {}) }, { dir: "auto" }, c.text);
         if (prop(c, "formula").trim()) formulaShown[c.id] = v => { text.textContent = v; };
+        if (prop(c, "stat")) {
+          const colOfName = name => { const i = headers.findIndex(x => normalize(x) === normalize(name)); return i < 0 ? null : i; };
+          const update = () => {
+            const rows = state.sheetRows;
+            if (!rows) { text.textContent = withStatistic(c.text || "", "…"); return; }
+            const numbers = rowsWhere(rows, prop(c, "statFilterColumn") ? colOfName(prop(c, "statFilterColumn")) : null, prop(c, "statFilterValue"));
+            text.textContent = withStatistic(c.text || "", statistic(rows, numbers, prop(c, "stat"), prop(c, "statColumn") ? colOfName(prop(c, "statColumn")) : null));
+          };
+          statLabels.push(update);
+          update();
+        }
         el.append(text);
         return el;
       }
@@ -809,6 +859,7 @@ export function runScreen(root, project, screen, store, opts) {
               const column = binds.find(([b]) => b === c)?.[1];
               if (scanMode !== "record" || column == null || !store) return;
               try {
+                state.resultsTarget = "";
                 const rows = state.sheetRows || await store.rows();
                 state.sheetRows = rows;
                 const found = searchAll(rows, { [column]: code });
@@ -937,16 +988,27 @@ export function runScreen(root, project, screen, store, opts) {
         const fromSheet = prop(c, "dataSource") === "sheet" && store;
         const draw = () => {
           let grid;
-          if (fromSheet) grid = (state.sheetRows || [store.headers]).slice(0, 501);
-          else {
+          let numbers = null; // Excel row number of each grid line when filtered
+          if (fromSheet) {
+            const rows = state.sheetRows || [store.headers];
+            const fcol = prop(c, "filterColumn") ? headers.findIndex(x => normalize(x) === normalize(prop(c, "filterColumn"))) : -1;
+            if (fcol >= 0) {
+              const source = prop(c, "filterField") && screen.components.find(o => normalize(o.name) === normalize(prop(c, "filterField")));
+              const wanted = source ? toExcel(source) : prop(c, "filterValue");
+              numbers = [1, ...rowsWhere(rows, fcol, wanted)].slice(0, 501);
+              grid = numbers.map(n => rows[n - 1]);
+            } else grid = rows.slice(0, 501);
+          } else {
             const cols = prop(c, "columns").split(",").map(s => s.trim()).filter(Boolean);
             grid = [cols.length ? cols : [""], ...Array.from({ length: Math.max(1, Math.trunc(num(c, "rows"))) }, () => cols.map(() => ""))];
           }
-          el.replaceChildren(drawTable(c, style, grid, fromSheet ? state.currentRow : null, fromSheet ? line => {
-            const row = state.sheetRows?.[line];
-            if (!row) return;
+          const shownRow = numbers ? (numbers.indexOf(state.currentRow) > 0 ? numbers.indexOf(state.currentRow) + 1 : null) : state.currentRow;
+          el.replaceChildren(drawTable(c, style, grid, fromSheet ? shownRow : null, fromSheet ? line => {
+            const number = numbers ? numbers[line] : line + 1;
+            const row = state.sheetRows?.[number - 1];
+            if (!row || number < 2) return;
             fill(row);
-            state.currentRow = line + 1; state.lastCriteria = null; state.filledSnapshot = formValues();
+            state.currentRow = number; state.lastCriteria = null; state.filledSnapshot = formValues();
             draw();
           } : null));
         };
@@ -1009,6 +1071,11 @@ export function runScreen(root, project, screen, store, opts) {
   }
 
   recompute();
+  // Opened to show a search result from another screen (its fields were filled before).
+  if (opts.openRow) {
+    state.currentRow = opts.openRow; state.filledSnapshot = formValues();
+    toast(t(`تم عرض الصف ${opts.openRow}`, `Showing row ${opts.openRow}`));
+  }
   reloadTables();
   return () => window.removeEventListener("resize", fit);
 }
@@ -1022,15 +1089,15 @@ export function runApp(root, project, store, opts) {
   const stack = [];
   let current = project.screens[0];
   let cleanup = null;
-  const show = () => {
+  const show = (openRow = null) => {
     cleanup?.();
     root.scrollTop = 0;
     cleanup = runScreen(root, project, current, store, {
-      ...opts, values,
-      openScreen: name => {
+      ...opts, values, openRow,
+      openScreen: (name, row) => {
         const next = project.screens.find(s => s.name === name);
         if (!next) return opts.toast(opts.t("اختر الشاشة التي يفتحها هذا الزر من خصائصه.", "Choose the screen this button opens in its properties."));
-        stack.push(current); current = next; show();
+        stack.push(current); current = next; show(row);
       },
       back: () => { if (stack.length) { current = stack.pop(); show(); } },
     });
