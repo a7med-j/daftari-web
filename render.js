@@ -72,6 +72,68 @@ export function search(rows, criteria, after = 1) {
   return null;
 }
 
+// ---- Calculations (same rules as Formula.kt): + - * / ( ), 15%, names bare or in [brackets] ----
+
+const toWestern = s => String(s ?? "").replace(/[\u0660-\u0669]/g, d => String(d.charCodeAt(0) - 0x0660))
+  .replace(/[\u06F0-\u06F9]/g, d => String(d.charCodeAt(0) - 0x06F0)).replace(/\u066B/g, ".");
+
+export function evaluateFormula(expression, valueOf) {
+  const src = toWestern(expression).replace(/×/g, "*").replace(/÷/g, "/").replace(/٪/g, "%");
+  const tokens = [];
+  let i = 0;
+  while (i < src.length) {
+    const c = src[i];
+    if (/\s/.test(c)) { i++; continue; }
+    if (/[0-9.]/.test(c)) { let j = i; while (j < src.length && /[0-9.]/.test(src[j])) j++; const n = Number(src.slice(i, j)); if (Number.isNaN(n)) return null; tokens.push({ n }); i = j; continue; }
+    if (c === "[") { const j = src.indexOf("]", i); if (j < 0) return null; tokens.push({ name: src.slice(i + 1, j).trim() }); i = j + 1; continue; }
+    if (/[\p{L}_]/u.test(c)) { let j = i; while (j < src.length && /[\p{L}\p{Nd}_]/u.test(src[j])) j++; tokens.push({ name: src.slice(i, j) }); i = j; continue; }
+    if ("+-*/()%".includes(c)) { tokens.push({ op: c }); i++; continue; }
+    return null;
+  }
+  if (!tokens.length) return null;
+  let pos = 0;
+  const peek = () => tokens[pos]?.op;
+  const num = v => { const n = parseFloat(toWestern(v)); return Number.isFinite(n) ? n : 0; };
+  function expr() { let v = term(); for (;;) { if (peek() === "+") { pos++; v += term(); } else if (peek() === "-") { pos++; v -= term(); } else return v; } }
+  function term() { let v = factor(); for (;;) { if (peek() === "*") { pos++; v *= factor(); } else if (peek() === "/") { pos++; v /= factor(); } else return v; } }
+  function factor() {
+    const tk = tokens[pos++];
+    if (!tk) throw 0;
+    let v;
+    if ("n" in tk) v = tk.n;
+    else if ("name" in tk) v = num(valueOf(tk.name));
+    else if (tk.op === "-") v = -factor();
+    else if (tk.op === "+") v = factor();
+    else if (tk.op === "(") { v = expr(); if (peek() !== ")") throw 0; pos++; }
+    else throw 0;
+    if (peek() === "%") { pos++; v /= 100; }
+    return v;
+  }
+  try { const v = expr(); return pos === tokens.length && Number.isFinite(v) ? v : null; } catch (e) { return null; }
+}
+
+export function formatNumber(v) {
+  const r = Math.round(v * 100) / 100;
+  return Number.isInteger(r) ? String(r) : r.toFixed(2).replace(/0+$/, "").replace(/\.$/, "");
+}
+
+/** Results of a screen's formulas by component id (formulas may use other formulas). */
+export function computeFormulas(screen, valueOf) {
+  const formulas = screen.components.filter(c => (c.type === "TEXT_FIELD" || c.type === "LABEL") && prop(c, "formula").trim());
+  const byName = Object.fromEntries(screen.components.map(c => [normalize(c.name), c]));
+  const results = {};
+  for (let pass = 0; pass < Math.min(formulas.length, 5); pass++) {
+    for (const c of formulas) {
+      const v = evaluateFormula(prop(c, "formula"), name => {
+        const other = byName[normalize(name)];
+        return other ? (results[other.id] ?? valueOf(other)) : "";
+      });
+      results[c.id] = v == null ? "؟" : formatNumber(v);
+    }
+  }
+  return results;
+}
+
 /** Column index of each input bound to a header, like FormLogic.bindings. */
 export function bindings(screen, headers) {
   const out = [];
@@ -194,19 +256,26 @@ export function runScreen(root, project, screen, store, opts) {
   const { lang, t, toast } = opts;
   const headers = store ? store.headers : [];
   const binds = bindings(screen, headers);
-  const values = {};
-  for (const c of screen.components) if (INPUT_TYPES.has(c.type)) values[c.id] = startValue(c, lang);
+  // Typed values are shared by all screens of the app, so they survive moving between screens.
+  const values = opts.values || {};
+  for (const c of screen.components) if (INPUT_TYPES.has(c.type) && !(c.id in values)) values[c.id] = startValue(c, lang);
+  let computed = {};
+  const formulaShown = {}; // component id -> function(text) for calculated fields
+  const recompute = () => {
+    computed = computeFormulas(screen, c => (c.type === "LABEL" ? c.text : values[c.id] ?? ""));
+    for (const [id, show] of Object.entries(formulaShown)) show(computed[id] ?? "");
+  };
   const state = { currentRow: null, lastCriteria: null, filledSnapshot: null, sheetRows: null, working: false };
   const inputs = {}; // component id -> function(value) updating its element
   const tables = [];
 
   const toExcel = c => {
-    const v = values[c.id] || "";
+    const v = computed[c.id] ?? values[c.id] ?? "";
     return c.type === "CHECKBOX" ? (v === "true" ? t("نعم", "Yes") : t("لا", "No")) : v;
   };
   const formValues = () => Object.fromEntries(binds.map(([c, col]) => [col, toExcel(c)]));
   const sameForm = (a, b) => a && b && JSON.stringify(a) === JSON.stringify(b);
-  const setValue = (c, v) => { values[c.id] = v; inputs[c.id]?.(v); };
+  const setValue = (c, v) => { values[c.id] = v; inputs[c.id]?.(v); recompute(); };
   const fill = row => {
     for (const [c, col] of binds) {
       const cell = row[col] ?? "";
@@ -226,9 +295,11 @@ export function runScreen(root, project, screen, store, opts) {
     try { state.sheetRows = await store.rows(); tables.forEach(draw => draw()); } catch (e) { toast(opts.errorText(e)); }
   }
 
-  async function perform(action) {
+  async function perform(action, target) {
     if (!action) return;
     if (action === "clear") return clearForm();
+    if (action === "openScreen") return opts.openScreen ? opts.openScreen(target) : null;
+    if (action === "back") return opts.back ? opts.back() : null;
     if (!store) return toast(t("هذا التطبيق غير مرتبط ببيانات.", "This app has no data source."));
     if (!binds.length) return toast(t("لا يوجد حقل مرتبط بعمود.", "No field is linked to a column."));
     if (state.working) return;
@@ -319,12 +390,14 @@ export function runScreen(root, project, screen, store, opts) {
       case "LABEL": {
         const max = Math.trunc(num(c, "maxLines"));
         const el = frame({ justifyContent: justify(prop(c, "textAlign")) });
-        el.append(h("div", { ...style, width: "100%", whiteSpace: "pre-wrap", ...(max > 0 ? { display: "-webkit-box", WebkitLineClamp: String(max), WebkitBoxOrient: "vertical", overflow: "hidden" } : {}) }, { dir: "auto" }, c.text));
+        const text = h("div", { ...style, width: "100%", whiteSpace: "pre-wrap", ...(max > 0 ? { display: "-webkit-box", WebkitLineClamp: String(max), WebkitBoxOrient: "vertical", overflow: "hidden" } : {}) }, { dir: "auto" }, c.text);
+        if (prop(c, "formula").trim()) formulaShown[c.id] = v => { text.textContent = v; };
+        el.append(text);
         return el;
       }
       case "BUTTON": {
         const el = h("button", { ...chrome(c), ...style, width: "100%", height: "100%", cursor: enabled ? "pointer" : "default", display: "flex", alignItems: "center", justifyContent: justify(prop(c, "textAlign")) },
-          { disabled: !enabled, onclick: () => perform(prop(c, "action")) }, c.text);
+          { disabled: !enabled, onclick: () => perform(prop(c, "action"), prop(c, "targetScreen")) }, c.text);
         return el;
       }
       case "TEXT_FIELD": {
@@ -334,16 +407,17 @@ export function runScreen(root, project, screen, store, opts) {
         const attrs = {
           placeholder: prop(c, "hint") + (required ? " *" : ""),
           maxlength: num(c, "maxLength") > 0 ? Math.trunc(num(c, "maxLength")) : null,
-          readonly: bool(c, "readOnly"), disabled: !enabled,
+          readonly: bool(c, "readOnly") || !!prop(c, "formula").trim(), disabled: !enabled,
           type: { password: "password", email: "email", phone: "tel" }[type] || "text",
           inputmode: { number: "numeric", decimal: "decimal", phone: "tel", email: "email" }[type] || null,
-          oninput: e => { values[c.id] = e.target.value; },
+          oninput: e => { values[c.id] = e.target.value; recompute(); },
         };
         const input = h(multiline ? "textarea" : "input",
           { ...style, width: "100%", height: "100%", border: "none", outline: "none", background: "transparent", resize: "none", padding: "0", fontFamily: style.fontFamily },
           attrs);
         input.value = values[c.id];
         inputs[c.id] = v => { input.value = v; };
+        if (prop(c, "formula").trim()) formulaShown[c.id] = v => { input.value = v; };
         const el = frame({ alignItems: multiline ? "flex-start" : "center" });
         el.style.setProperty("--hint", cssColor(prop(c, "hintColor")));
         input.classList.add("hinted");
@@ -353,7 +427,7 @@ export function runScreen(root, project, screen, store, opts) {
       case "DROPDOWN": {
         const items = prop(c, "items").split("\n").filter(s => s.trim());
         const select = h("select", { ...style, width: "100%", height: "100%", border: "none", background: "transparent", outline: "none" },
-          { disabled: !enabled, onchange: e => { values[c.id] = e.target.value; } },
+          { disabled: !enabled, onchange: e => { values[c.id] = e.target.value; recompute(); } },
           h("option", {}, { value: "" }, prop(c, "hint")),
           items.map(item => h("option", {}, { value: item }, item)));
         const sync = v => {
@@ -386,7 +460,7 @@ export function runScreen(root, project, screen, store, opts) {
       }
       case "CHECKBOX": {
         const box = h("input", { width: "20px", height: "20px", accentColor: cssColor(prop(c, "checkColor")), flex: "0 0 auto", margin: "0" },
-          { type: "checkbox", disabled: !enabled, onchange: e => { values[c.id] = String(e.target.checked); } });
+          { type: "checkbox", disabled: !enabled, onchange: e => { values[c.id] = String(e.target.checked); recompute(); } });
         box.checked = values[c.id] === "true";
         inputs[c.id] = v => { box.checked = v === "true"; };
         const text = h("span", { ...style, flex: "1" }, { dir: "auto" }, c.text);
@@ -421,8 +495,36 @@ export function runScreen(root, project, screen, store, opts) {
     }
   }
 
+  recompute();
   reloadTables();
   return () => window.removeEventListener("resize", fit);
+}
+
+/**
+ * Runs a whole app: starts on the first screen; "open screen" buttons move forward and "back"
+ * returns. Typed values are kept while moving between screens.
+ */
+export function runApp(root, project, store, opts) {
+  const values = {};
+  const stack = [];
+  let current = project.screens[0];
+  let cleanup = null;
+  const show = () => {
+    cleanup?.();
+    root.scrollTop = 0;
+    cleanup = runScreen(root, project, current, store, {
+      ...opts, values,
+      openScreen: name => {
+        const next = project.screens.find(s => s.name === name);
+        if (!next) return opts.toast(opts.t("اختر الشاشة التي يفتحها هذا الزر من خصائصه.", "Choose the screen this button opens in its properties."));
+        stack.push(current); current = next; show();
+      },
+      back: () => { if (stack.length) { current = stack.pop(); show(); } },
+    });
+    opts.onScreen?.(current);
+  };
+  show();
+  return { cleanup: () => cleanup?.(), back: () => (stack.length ? (current = stack.pop(), show(), true) : false) };
 }
 
 /** Table from grid (line 0 = headers). Vertical orientation shows one column per record. */

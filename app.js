@@ -10,7 +10,7 @@ import {
   getFirestore, doc, getDoc, setDoc, deleteDoc, collection, getDocs, query, where, runTransaction, serverTimestamp,
 } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore.js";
 import { firebaseConfig } from "./config.js";
-import { runScreen } from "./render.js";
+import { runApp } from "./render.js";
 
 const fb = initializeApp(firebaseConfig);
 const auth = getAuth(fb);
@@ -241,10 +241,12 @@ async function appView(user, appId) {
       if (!snap.exists()) throw fail("app-gone");
       const data = snap.data();
       const project = JSON.parse(data.json);
-      const screen = project.screens[0];
       document.title = project.name;
-      wrap.style.background = cssBackground(screen);
-      cleanup = runScreen(stage, project, screen, cloudStore(appId, data.headers || []), { lang, t, toast, confirm: confirmBox, errorText });
+      const app = runApp(stage, project, cloudStore(appId, data.headers || []), {
+        lang, t, toast, confirm: confirmBox, errorText,
+        onScreen: screen => { wrap.style.background = cssBackground(screen); },
+      });
+      cleanup = app.cleanup;
     } catch (e) {
       stage.replaceChildren(el("p", { class: "muted" }, errorText(e)));
     }
