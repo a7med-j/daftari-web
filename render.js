@@ -26,9 +26,61 @@ const BY_TYPE = {
   },
   DATE_PICKER: { dateFormat: "yyyy/MM/dd", calendar: "gregorian", defaultToday: "true" },
   CHECKBOX: { backgroundColor: "#00FFFFFF", borderWidth: "0", checked: "false", checkColor: "#FF20B879", boxPosition: "start" },
+  PHOTO: { hint: "اضغط لالتقاط صورة", imageFit: "contain", required: "false", textColor: "#FF607D8B", textAlign: "center", fontSize: "13", backgroundColor: "#FFFFFFFF", borderWidth: "1" },
+  IMAGE: { imageData: "", imageFit: "contain", backgroundColor: "#00FFFFFF", borderWidth: "0" },
 };
 
-const INPUT_TYPES = new Set(["TEXT_FIELD", "DROPDOWN", "DATE_PICKER", "CHECKBOX"]);
+const INPUT_TYPES = new Set(["TEXT_FIELD", "DROPDOWN", "DATE_PICKER", "CHECKBOX", "PHOTO"]);
+const PHOTO_NAME = /^IMG_\d{8}_\d{6}_[0-9a-f]{4}\.jpg$/;
+export const isPhoto = v => PHOTO_NAME.test(String(v || "").trim());
+const FIT = { contain: "contain", cover: "cover", stretch: "fill" };
+
+function photoName() {
+  const d = new Date(), p = n => String(n).padStart(2, "0");
+  return `IMG_${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}_${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}_` +
+    crypto.randomUUID().slice(0, 4) + ".jpg";
+}
+
+/** Shrinks a picked picture (upright, longer side at most 1280px) to a JPEG under ~700 KB. */
+export async function compressPhoto(file, maxSide = 1280, maxBytes = 700000) {
+  const bitmap = await createImageBitmap(file, { imageOrientation: "from-image" });
+  const scale = Math.min(1, maxSide / Math.max(bitmap.width, bitmap.height));
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.round(bitmap.width * scale);
+  canvas.height = Math.round(bitmap.height * scale);
+  canvas.getContext("2d").drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+  let blob;
+  for (let q = 0.8; q >= 0.3; q -= 0.1) {
+    blob = await new Promise(r => canvas.toBlob(r, "image/jpeg", q));
+    if (blob.size <= maxBytes) break;
+  }
+  return new Uint8Array(await blob.arrayBuffer());
+}
+
+const esc = s => String(s ?? "").replace(/[&<>"]/g, ch => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[ch]);
+
+/** Opens a printable report in a new tab (the browser's print dialog can save it as PDF). */
+function reportWindow(lang) {
+  const w = window.open("", "_blank");
+  if (w) w.document.write(`<p style="font-family:sans-serif;padding:24px">${lang === "en" ? "Preparing the report…" : "جارٍ تجهيز التقرير…"}</p>`);
+  return w;
+}
+function showReport(w, lang, title, body) {
+  const stamp = new Date().toLocaleString(lang === "en" ? "en" : "ar-u-nu-latn");
+  w.document.open();
+  w.document.write(`<!DOCTYPE html><html lang="${lang}" dir="${lang === "en" ? "ltr" : "rtl"}"><head><meta charset="utf-8">
+<title>${esc(title)}</title><style>
+body{font-family:system-ui,"Segoe UI",Tahoma,sans-serif;color:#183328;margin:24px}
+h1{color:#00838F;font-size:22px;margin:0 0 4px}.stamp{color:#6B7C74;font-size:12px;margin-bottom:12px;border-bottom:2px solid #00838F;padding-bottom:8px}
+table{border-collapse:collapse;width:100%;font-size:12px}td,th{border:1px solid #C8D3CD;padding:6px;text-align:start;vertical-align:top}
+th{background:#1E7145;color:#fff}.cap{background:#EEF5F1;font-weight:bold;width:32%}tr.s td{background:#F5F8F6}
+img{max-width:100%;max-height:300px}@page{margin:14mm}@media print{.no{display:none}}
+button{font-size:15px;padding:8px 18px;margin-bottom:12px}
+</style></head><body><button class="no" onclick="print()">${lang === "en" ? "Print / Save as PDF" : "طباعة / حفظ PDF"}</button>
+<h1>${esc(title)}</h1><div class="stamp">${esc(stamp)}</div>${body}
+<script>window.addEventListener("load",()=>setTimeout(()=>print(),400))<\/script></body></html>`);
+  w.document.close();
+}
 const TRUTHY = new Set(["true", "yes", "نعم", "1", "✓", "✔", "صح"]);
 
 export function prop(c, key) {
@@ -43,6 +95,8 @@ const num = (c, k) => parseFloat(prop(c, k)) || 0;
 const bool = (c, k) => prop(c, k) === "true";
 
 /** "#AARRGGBB" or "#RRGGBB" to a CSS color. */
+const prop2 = (screen, key) => ((screen.properties || {})[key] || "").trim();
+
 export function cssColor(hex) {
   const h = (hex || "").replace("#", "");
   if (h.length === 6) return "#" + h;
@@ -287,7 +341,7 @@ export function runScreen(root, project, screen, store, opts) {
     state.currentRow = null; state.filledSnapshot = null;
   };
   const missingRequired = () => binds
-    .filter(([c]) => c.type === "TEXT_FIELD" && bool(c, "required") && !(values[c.id] || "").trim())
+    .filter(([c]) => (c.type === "TEXT_FIELD" || c.type === "PHOTO") && bool(c, "required") && !(values[c.id] || "").trim())
     .map(([c, col]) => headers[col] || c.name);
 
   async function reloadTables() {
@@ -300,6 +354,8 @@ export function runScreen(root, project, screen, store, opts) {
     if (action === "clear") return clearForm();
     if (action === "openScreen") return opts.openScreen ? opts.openScreen(target) : null;
     if (action === "back") return opts.back ? opts.back() : null;
+    if (action === "pdfRecord") return recordReport();
+    if (action === "pdfTable") return tableReport();
     if (!store) return toast(t("هذا التطبيق غير مرتبط ببيانات.", "This app has no data source."));
     if (!binds.length) return toast(t("لا يوجد حقل مرتبط بعمود.", "No field is linked to a column."));
     if (state.working) return;
@@ -348,6 +404,54 @@ export function runScreen(root, project, screen, store, opts) {
       toast(opts.errorText(e));
     } finally {
       state.working = false;
+    }
+  }
+
+  function caption(c) {
+    // The label beside the input (same line, nearest), else the column, else the name.
+    const labels = screen.components.filter(l => l.type === "LABEL" && (l.text || "").trim() && !prop(l, "formula").trim());
+    const overlap = l => Math.max(0, Math.min(l.y + l.height, c.y + c.height) - Math.max(l.y, c.y));
+    const gap = l => (l.x + l.width <= c.x ? c.x - l.x - l.width : c.x + c.width <= l.x ? l.x - c.x - c.width : 0);
+    const same = labels.filter(l => overlap(l) > Math.min(l.height, c.height) / 2).sort((a, b) => gap(a) - gap(b))[0];
+    const above = labels.filter(l => l.y + l.height <= c.y + 4 && c.y - (l.y + l.height) <= 48 && Math.min(l.x + l.width, c.x + c.width) > Math.max(l.x, c.x))
+      .sort((a, b) => b.y - a.y)[0];
+    return ((same || above)?.text || prop(c, "column") || c.name).trim().replace(/[:：]$/, "");
+  }
+
+  async function recordReport() {
+    const fields = screen.components.filter(c => INPUT_TYPES.has(c.type)).sort((a, b) => a.y - b.y || a.x - b.x);
+    if (fields.every(c => c.type === "CHECKBOX" || !(values[c.id] || "").trim())) {
+      return toast(t("النموذج فارغ. املأ الحقول أو ابحث عن سجل ثم أنشئ التقرير.", "The form is empty. Fill it in or search for a record first."));
+    }
+    const w = reportWindow(lang);
+    if (!w) return toast(t("اسمح بالنوافذ المنبثقة لهذا الموقع لعرض التقرير.", "Allow pop-ups for this site to see the report."));
+    const results = screen.components.filter(c => c.type === "LABEL" && c.id in computed);
+    const rows = [];
+    for (const c of [...fields, ...results]) {
+      let cell;
+      if (c.type === "PHOTO") {
+        const url = values[c.id] && store?.loadPhoto ? await store.loadPhoto(values[c.id]).catch(() => null) : null;
+        cell = url ? `<img src="${url}">` : t("(لا توجد صورة)", "(no photo)");
+      } else cell = esc(toExcel(c) || "—");
+      rows.push(`<tr><td class="cap">${esc(caption(c))}</td><td>${cell}</td></tr>`);
+    }
+    showReport(w, lang, prop2(screen, "title") || project.name, `<table>${rows.join("")}</table>`);
+  }
+
+  async function tableReport() {
+    if (!store) return toast(t("لا يوجد جدول بيانات مرتبط.", "No data table is linked."));
+    const w = reportWindow(lang);
+    if (!w) return toast(t("اسمح بالنوافذ المنبثقة لهذا الموقع لعرض التقرير.", "Allow pop-ups for this site to see the report."));
+    try {
+      const [head, ...data] = await store.rows();
+      const filled = data.filter(r => r.some(v => String(v).trim()));
+      const cell = v => (isPhoto(v) ? t("صورة", "Photo") : esc(v));
+      const body = `<p>${t("عدد السجلات: ", "Records: ")}${filled.length}</p><table><tr><th>#</th>${head.map(x => `<th>${esc(x)}</th>`).join("")}</tr>` +
+        filled.map((r, i) => `<tr class="${i % 2 ? "s" : ""}"><td>${i + 1}</td>${head.map((_, j) => `<td>${cell(r[j] ?? "")}</td>`).join("")}</tr>`).join("") + "</table>";
+      showReport(w, lang, project.name, body);
+    } catch (e) {
+      w.close();
+      toast(opts.errorText(e));
     }
   }
 
@@ -488,6 +592,55 @@ export function runScreen(root, project, screen, store, opts) {
         };
         draw();
         if (fromSheet) tables.push(draw);
+        return el;
+      }
+      case "IMAGE": {
+        const el = frame({ justifyContent: "center", overflow: "hidden" });
+        const data = prop(c, "imageData");
+        if (data) el.append(h("img", { width: "100%", height: "100%", objectFit: FIT[prop(c, "imageFit")] || "contain" }, { src: data, alt: c.name }));
+        else el.append(h("span", { fontSize: "30px", opacity: "0.5" }, {}, "🖼️"));
+        return el;
+      }
+      case "PHOTO": {
+        const el = frame({ justifyContent: "center", position: "relative", overflow: "hidden", cursor: enabled ? "pointer" : "default", flexDirection: "column" });
+        const picker = h("input", { display: "none" }, { type: "file", accept: "image/*" });
+        let busy = false;
+        const show = async v => {
+          el.replaceChildren(picker);
+          if (busy) { el.append(h("div", style, {}, t("جارٍ الحفظ…", "Saving…"))); return; }
+          if (!v) {
+            el.append(h("div", { fontSize: "30px" }, {}, "📷"),
+              h("div", { ...style, textAlign: "center" }, {}, prop(c, "hint") + (bool(c, "required") ? " *" : "")));
+            return;
+          }
+          const url = store?.loadPhoto ? await store.loadPhoto(v).catch(() => null) : null;
+          if (values[c.id] !== v) return;
+          if (url) el.append(h("img", { width: "100%", height: "100%", objectFit: FIT[prop(c, "imageFit")] || "contain" }, { src: url, alt: c.name }));
+          else el.append(h("div", { ...style, textAlign: "center" }, {}, t("الصورة غير متاحة", "Photo not available")));
+          if (enabled) {
+            el.append(h("button", { position: "absolute", top: "4px", insetInlineEnd: "4px", border: "0", borderRadius: "50%", width: "26px", height: "26px", background: "#000a", color: "#fff", cursor: "pointer" },
+              { title: t("إزالة الصورة", "Remove photo"), onclick: e => { e.stopPropagation(); setValue(c, ""); } }, "✕"));
+          }
+        };
+        picker.onchange = async () => {
+          const file = picker.files?.[0];
+          picker.value = "";
+          if (!file) return;
+          if (!store?.savePhoto) return toast(t("حفظ الصور يحتاج تطبيقًا منشورًا.", "Saving photos needs a published app."));
+          busy = true; show("");
+          try {
+            const name = photoName();
+            await store.savePhoto(name, await compressPhoto(file));
+            busy = false;
+            setValue(c, name);
+          } catch (e) {
+            busy = false; show(values[c.id]);
+            toast(opts.errorText(e));
+          }
+        };
+        el.onclick = () => { if (enabled && !busy) picker.click(); };
+        inputs[c.id] = show;
+        show(values[c.id]);
         return el;
       }
       default:

@@ -7,7 +7,7 @@ import {
   sendPasswordResetEmail, signOut,
 } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-auth.js";
 import {
-  getFirestore, doc, getDoc, setDoc, deleteDoc, collection, getDocs, query, where, runTransaction, serverTimestamp,
+  getFirestore, doc, getDoc, setDoc, deleteDoc, collection, getDocs, query, where, runTransaction, serverTimestamp, Bytes,
 } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore.js";
 import { firebaseConfig } from "./config.js";
 import { runApp } from "./render.js";
@@ -86,6 +86,7 @@ const readRows = raw => (Array.isArray(raw) ? raw : []).map(m => ({ id: String(m
 function cloudStore(appId, headers) {
   const col = collection(db, "apps", appId, "chunks");
   let snapshot = []; // { id, chunk, c } in table order; index 0 is row 2
+  const photoCache = new Map();
   return {
     headers,
     async rows() {
@@ -116,6 +117,23 @@ function cloudStore(appId, headers) {
     },
     async delete(number) {
       await change(number, () => null);
+    },
+    // Photos: one compressed JPEG per document, shown from a small in-memory cache.
+    async savePhoto(name, jpeg) {
+      await setDoc(doc(db, "apps", appId, "photos", name), { data: Bytes.fromUint8Array(jpeg), createdAt: serverTimestamp() });
+      photoCache.set(name, URL.createObjectURL(new Blob([jpeg], { type: "image/jpeg" })));
+    },
+    async loadPhoto(name) {
+      if (!photoCache.has(name)) {
+        photoCache.set(name, (async () => {
+          const snap = await getDoc(doc(db, "apps", appId, "photos", name));
+          const data = snap.data()?.data;
+          if (!data) return null;
+          const blob = new Blob([data.toUint8Array()], { type: "image/jpeg" });
+          return await new Promise(r => { const fr = new FileReader(); fr.onload = () => r(fr.result); fr.readAsDataURL(blob); });
+        })());
+      }
+      return await photoCache.get(name);
     },
   };
   async function change(number, transform) {
