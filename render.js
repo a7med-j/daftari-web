@@ -82,6 +82,14 @@ export function lookups(screen, valueOf, rowsOf) {
   return out;
 }
 
+/** The first record other than `except` whose column holds the value (see FormLogic.duplicateRow), or null. */
+export function duplicateRow(rows, column, value, except = null) {
+  const wanted = normalize(value ?? "");
+  if (!wanted) return null;
+  for (let n = 2; n <= rows.length; n++) if (n !== except && normalize((rows[n - 1] || [])[column] ?? "") === wanted) return n;
+  return null;
+}
+
 /** A number typed with Arabic or Western digits ("٢٥", "1,250.5"), or null (see FormLogic.numberOf). */
 export function numberOf(text) {
   const v = String(text ?? "").trim().replace(/[٠-٩]/g, d => "٠١٢٣٤٥٦٧٨٩".indexOf(d)).replace(/٫/g, ".").replace(/[,،]/g, "");
@@ -816,6 +824,15 @@ export function runScreen(root, project, screen, store, opts) {
     .filter(([c]) => ["TEXT_FIELD", "PHOTO", "RADIO", "SIGNATURE", "LOCATION"].includes(c.type) && bool(c, "required") && !bool(c, "autoNumber")
       && !(values[c.id] || "").trim() && isShown(c))
     .map(([c, col]) => headers[col] || c.name);
+  /** A "no repeats" field whose value another record (not `except`) already has, as a message, or null. */
+  const duplicateError = (rows, except) => {
+    for (const [c, col] of binds) {
+      if (!bool(c, "noRepeat") || !isShown(c)) continue;
+      const value = toExcel(c), n = duplicateRow(rows, col, value, except);
+      if (n) return t(`«${headers[col] || c.name}» ${value} موجود مسبقًا في الصف ${n}، لا يمكن تكراره.`, `"${headers[col] || c.name}" ${value} is already in row ${n} and can't be repeated.`);
+    }
+    return null;
+  };
   /** The first field whose number is outside its lowest / highest, as a message, or null. */
   const rangeError = () => {
     for (const [c, col] of binds) {
@@ -930,6 +947,8 @@ export function runScreen(root, project, screen, store, opts) {
         if (rangeError()) return toast(rangeError());
         const rows = await store.rows();
         const found = searchAll(rows, { [keyCol]: keyValue })[0];
+        const repeated = duplicateError(rows, found || null);
+        if (repeated) return toast(repeated);
         if (found) { await store.update(found, formValues()); toast(t(`تم تحديث سجل «${keyValue}» ✓`, `"${keyValue}" updated ✓`)); }
         else { const row = await store.append(formValues()); toast(t(`تمت إضافة «${keyValue}» في الصف ${row} ✓`, `"${keyValue}" added in row ${row} ✓`)); }
         clearForm();
@@ -938,6 +957,8 @@ export function runScreen(root, project, screen, store, opts) {
         if (missing.length) return toast(t("املأ الحقول المطلوبة: ", "Fill in the required fields: ") + missing.join("، "));
         if (rangeError()) return toast(rangeError());
         if (Object.values(formValues()).every(v => !String(v).trim())) return toast(t("الحقول فارغة.", "The fields are empty."));
+        const repeated = duplicateError(await store.rows(), null);
+        if (repeated) return toast(repeated);
         // Serial numbers: one more than the largest already in the column.
         const numbered = binds.filter(([c]) => bool(c, "autoNumber") && !(values[c.id] || "").trim());
         const assigned = [];
@@ -971,6 +992,8 @@ export function runScreen(root, project, screen, store, opts) {
         const missing = missingRequired();
         if (missing.length) return toast(t("املأ الحقول المطلوبة: ", "Fill in the required fields: ") + missing.join("، "));
         if (rangeError()) return toast(rangeError());
+        const repeated = duplicateError(await store.rows(), row);
+        if (repeated) return toast(repeated);
         await store.update(row, formValues());
         state.filledSnapshot = formValues();
         toast(t(`تم حفظ التعديل على الصف ${row} ✓`, `Row ${row} updated ✓`));

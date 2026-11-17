@@ -4,7 +4,7 @@
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-app.js";
 import {
   getAuth, onAuthStateChanged, signInWithEmailAndPassword, createUserWithEmailAndPassword,
-  sendPasswordResetEmail, signOut,
+  sendPasswordResetEmail, signOut, updateProfile,
 } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-auth.js";
 import {
   getFirestore, doc, getDoc, setDoc, deleteDoc, collection, getDocs, query, where, runTransaction, serverTimestamp, Bytes,
@@ -81,7 +81,9 @@ let pendingCode = normalizeCode(new URLSearchParams(location.search).get("code")
 const CHUNK = 200;
 const chunkId = i => "c" + String(i).padStart(5, "0");
 const chunkIndex = id => (/^c\d+$/.test(id) ? Number(id.slice(1)) : null);
-const readRows = raw => (Array.isArray(raw) ? raw : []).map(m => ({ id: String(m?.id ?? ""), c: (m?.c || []).map(v => String(v ?? "")) }));
+const readRows = raw => (Array.isArray(raw) ? raw : []).map(m => ({ ...(m || {}), id: String(m?.id ?? ""), c: (m?.c || []).map(v => String(v ?? "")) }));
+/** Who adds a record (kept with it, so the owner can count each member's records). */
+const authorOf = user => ({ by: user?.uid || "", byName: (user?.displayName || "").trim() || user?.email || "", at: String(Date.now()) });
 
 function cloudStore(appId, headers, fileId = "") {
   // Extra files of the project keep their records under tables/{fileId}.
@@ -100,7 +102,7 @@ function cloudStore(appId, headers, fileId = "") {
       const cells = Array.from({ length: width }, (_, i) => values[i] ?? "");
       const ids = (await getDocs(col)).docs.map(d => chunkIndex(d.id)).filter(i => i != null);
       const last = ids.length ? Math.max(...ids) : null;
-      const row = { id: crypto.randomUUID(), c: cells };
+      const row = { ...authorOf(auth.currentUser), id: crypto.randomUUID(), c: cells };
       await runTransaction(db, async tx => {
         const lastRows = last == null ? [] : readRows((await tx.get(doc(col, chunkId(last)))).data()?.rows);
         const target = last == null ? 0 : lastRows.length >= CHUNK ? last + 1 : last;
@@ -146,7 +148,7 @@ function cloudStore(appId, headers, fileId = "") {
       const edited = [];
       for (const r of rows) {
         if (r.id !== target.id) edited.push(r);
-        else { const c = transform(r.c); if (c) edited.push({ id: r.id, c }); }
+        else { const c = transform(r.c); if (c) edited.push({ ...r, c }); }
       }
       tx.set(ref, { rows: edited, updatedAt: serverTimestamp() });
     });
@@ -161,7 +163,7 @@ async function join(user, code) {
   if (ownerUid !== user.uid) {
     // Already a member: joining again keeps the membership (and the access the owner gave).
     const member = await getDoc(doc(db, "apps", appId, "members", user.uid)).catch(() => null);
-    if (!member?.exists()) await setDoc(doc(db, "apps", appId, "members", user.uid), { code, email: user.email || "", joinedAt: Date.now() });
+    if (!member?.exists()) await setDoc(doc(db, "apps", appId, "members", user.uid), { code, email: user.email || "", name: (user.displayName || "").trim(), joinedAt: Date.now() });
   }
   const app = await getDoc(doc(db, "apps", appId));
   if (!app.exists()) throw fail("app-gone");
@@ -188,6 +190,7 @@ function loginView() {
   const email = el("input", { type: "email", placeholder: t("البريد الإلكتروني", "Email"), autocomplete: "email", dir: "ltr" });
   const pass = el("input", { type: "password", placeholder: t("كلمة المرور", "Password"), autocomplete: "current-password", dir: "ltr" });
   const confirm = el("input", { type: "password", placeholder: t("تأكيد كلمة المرور", "Confirm password"), dir: "ltr", hidden: true });
+  const firstName = el("input", { placeholder: t("الاسم الأول", "First name"), autocomplete: "given-name", maxlength: "40", hidden: true });
   const title = el("h2", {}, t("تسجيل الدخول", "Sign in"));
   const submit = el("button", { class: "primary" }, t("دخول", "Sign in"));
   const swap = el("button", { class: "link" }, t("ليس لديك حساب؟ أنشئ حسابًا", "No account? Create one"));
@@ -196,6 +199,7 @@ function loginView() {
   swap.onclick = () => {
     signUp = !signUp;
     confirm.hidden = !signUp;
+    firstName.hidden = !signUp;
     forgot.hidden = signUp;
     title.textContent = signUp ? t("إنشاء حساب", "Create account") : t("تسجيل الدخول", "Sign in");
     submit.textContent = signUp ? t("إنشاء الحساب", "Create account") : t("دخول", "Sign in");
@@ -205,8 +209,11 @@ function loginView() {
     submit.disabled = true;
     try {
       if (signUp) {
+        if (!firstName.value.trim()) return toast(t("اكتب اسمك الأول.", "Enter your first name."));
         if (pass.value !== confirm.value) return toast(t("كلمتا المرور غير متطابقتين.", "Passwords do not match."));
-        await createUserWithEmailAndPassword(auth, email.value.trim(), pass.value);
+        const made = await createUserWithEmailAndPassword(auth, email.value.trim(), pass.value);
+        await updateProfile(made.user, { displayName: firstName.value.trim() });
+        route();
       } else {
         await signInWithEmailAndPassword(auth, email.value.trim(), pass.value);
       }
@@ -216,7 +223,7 @@ function loginView() {
     try { await sendPasswordResetEmail(auth, email.value.trim()); toast(t("أرسلنا رابط إعادة التعيين إلى بريدك.", "We sent a reset link to your email.")); }
     catch (e) { toast(errorText(e)); }
   };
-  return el("main", { class: "narrow" }, el("div", { class: "card" }, title, note, email, pass, confirm, submit, swap, forgot));
+  return el("main", { class: "narrow" }, el("div", { class: "card" }, title, note, firstName, email, pass, confirm, submit, swap, forgot));
 }
 
 async function homeView(user) {
@@ -267,7 +274,7 @@ async function appView(user, appId) {
       useAppManifest(project.name, location.pathname + "?app=" + encodeURIComponent(appId), project.icon || "icon-512.png");
       // The owner and members the owner made editors may change records; other members only look.
       const canEdit = data.ownerUid === user.uid || (await getDoc(doc(db, "apps", appId, "members", user.uid))).data()?.role === "editor";
-      const requestAccess = () => setDoc(doc(db, "apps", appId, "requests", user.uid), { email: user.email || "", at: Date.now() });
+      const requestAccess = () => setDoc(doc(db, "apps", appId, "requests", user.uid), { email: user.email || "", name: (user.displayName || "").trim(), at: Date.now() });
       const storeFor = id => { const f = (project.files || []).find(x => x.id === id); return f ? cloudStore(appId, f.link.headers || [], id) : null; };
       const app = runApp(stage, project, cloudStore(appId, data.headers || []), {
         storeFor,
@@ -289,12 +296,38 @@ function cssBackground(screen) {
   return `rgba(${parseInt(hex.slice(2, 4), 16)},${parseInt(hex.slice(4, 6), 16)},${parseInt(hex.slice(6, 8), 16)},${a})`;
 }
 
+function nameView(user) {
+  const input = el("input", { placeholder: t("الاسم الأول", "First name"), autocomplete: "given-name", maxlength: "40" });
+  const save = el("button", { class: "primary" }, t("حفظ", "Save"));
+  save.onclick = async () => {
+    const name = input.value.trim();
+    if (!name) return toast(t("اكتب اسمك الأول.", "Enter your first name."));
+    save.disabled = true;
+    try {
+      await updateProfile(user, { displayName: name });
+      // The apps already joined show the owner this name too.
+      const joined = (await getDocs(collection(db, "users", user.uid, "joined"))).docs;
+      await Promise.all(joined.map(d => setDoc(doc(db, "apps", d.id, "members", user.uid), { name }, { merge: true }).catch(() => {})));
+      route();
+    } catch (e) { toast(errorText(e)); save.disabled = false; }
+  };
+  return el("main", { class: "narrow" }, el("div", { class: "card" },
+    el("h2", {}, t("اكتب اسمك الأول", "Enter your first name")),
+    el("p", { class: "note" }, t("حتى يعرفك صاحب التطبيق ويرى ما أضفته.", "So app owners know who you are and what you added.")),
+    input, save));
+}
+
 let currentUser = null;
 async function route() {
   if (cleanup) { cleanup(); cleanup = null; }
   const user = currentUser;
   if (!user) {
     $app.replaceChildren(header(null), loginView());
+    return;
+  }
+  // Accounts made before first names were asked for give one, so app owners know who they are.
+  if (!(user.displayName || "").trim()) {
+    $app.replaceChildren(header(user), nameView(user));
     return;
   }
   if (pendingCode) {

@@ -202,7 +202,9 @@ export async function runStandalone(CONFIG, ICON) {
   const CHUNK = 200;
   const chunkId = i => "c" + String(i).padStart(5, "0");
   const chunkIndex = id => (/^c\d+$/.test(id) ? Number(id.slice(1)) : null);
-  const readRows = raw => (Array.isArray(raw) ? raw : []).map(m => ({ id: String(m?.id ?? ""), c: (m?.c || []).map(v => String(v ?? "")) }));
+  const readRows = raw => (Array.isArray(raw) ? raw : []).map(m => ({ ...(m || {}), id: String(m?.id ?? ""), c: (m?.c || []).map(v => String(v ?? "")) }));
+  // Who adds a record (kept with it, so the owner can count each member's records).
+  const authorOf = user => ({ by: user?.uid || "", byName: (user?.displayName || "").trim() || user?.email || "", at: String(Date.now()) });
 
   function cloudStore(appId, headers, fileId = "") {
     const col = fileId ? fb.collection(db, "apps", appId, "tables", fileId, "chunks") : fb.collection(db, "apps", appId, "chunks");
@@ -214,7 +216,7 @@ export async function runStandalone(CONFIG, ICON) {
       const ref = fb.doc(col, target.chunk);
       await fb.runTransaction(db, async tx => {
         const rows = readRows((await tx.get(ref)).data()?.rows), edited = [];
-        for (const r of rows) { if (r.id !== target.id) edited.push(r); else { const c = transform(r.c); if (c) edited.push({ id: r.id, c }); } }
+        for (const r of rows) { if (r.id !== target.id) edited.push(r); else { const c = transform(r.c); if (c) edited.push({ ...r, c }); } }
         tx.set(ref, { rows: edited, updatedAt: fb.serverTimestamp() });
       });
     }
@@ -230,7 +232,7 @@ export async function runStandalone(CONFIG, ICON) {
         const cells = Array.from({ length: width }, (_, i) => values[i] ?? "");
         const ids = (await fb.getDocs(col)).docs.map(d => chunkIndex(d.id)).filter(i => i != null);
         const last = ids.length ? Math.max(...ids) : null;
-        const row = { id: crypto.randomUUID(), c: cells };
+        const row = { ...authorOf(fb.auth.currentUser), id: crypto.randomUUID(), c: cells };
         await fb.runTransaction(db, async tx => {
           const lastRows = last == null ? [] : readRows((await tx.get(fb.doc(col, chunkId(last)))).data()?.rows);
           const target = last == null ? 0 : lastRows.length >= CHUNK ? last + 1 : last;
@@ -262,7 +264,7 @@ export async function runStandalone(CONFIG, ICON) {
     const codeDoc = await fb.getDoc(fb.doc(db, "shareCodes", CONFIG.shareCode));
     if (!codeDoc.exists() || codeDoc.data().appId !== CONFIG.appId) throw fail("not-found-code");
     if (codeDoc.data().ownerUid !== user.uid) {
-      await fb.setDoc(fb.doc(db, "apps", CONFIG.appId, "members", user.uid), { code: CONFIG.shareCode, email: user.email || "", joinedAt: Date.now() });
+      await fb.setDoc(fb.doc(db, "apps", CONFIG.appId, "members", user.uid), { code: CONFIG.shareCode, email: user.email || "", name: (user.displayName || "").trim(), joinedAt: Date.now() });
     }
   }
 
@@ -280,7 +282,7 @@ export async function runStandalone(CONFIG, ICON) {
       // The owner and members the owner made editors may change records; other members only look.
       const canEdit = data.ownerUid === user.uid ||
         (await fb.getDoc(fb.doc(db, "apps", CONFIG.appId, "members", user.uid))).data()?.role === "editor";
-      const requestAccess = () => fb.setDoc(fb.doc(db, "apps", CONFIG.appId, "requests", user.uid), { email: user.email || "", at: Date.now() });
+      const requestAccess = () => fb.setDoc(fb.doc(db, "apps", CONFIG.appId, "requests", user.uid), { email: user.email || "", name: (user.displayName || "").trim(), at: Date.now() });
       setMenu([
         [t("تصدير البيانات إلى Excel", "Export data to Excel"), () => exportExcel(store)],
         [t("تسجيل الخروج", "Sign out"), () => fb.signOut(fb.auth)],
@@ -298,6 +300,8 @@ export async function runStandalone(CONFIG, ICON) {
     let signUp = false;
     const email = node("input", { type: "email", placeholder: t("البريد الإلكتروني", "Email"), autocomplete: "email" });
     const pass = node("input", { type: "password", placeholder: t("كلمة المرور", "Password"), autocomplete: "current-password" });
+    const firstName = node("input", { placeholder: t("الاسم الأول", "First name"), autocomplete: "given-name", maxlength: "40" });
+    firstName.hidden = true;
     const go = node("button", { class: "btn" });
     const toggle = node("button", { class: "lnk" });
     const msg = node("p", { class: "muted" });
@@ -309,17 +313,51 @@ export async function runStandalone(CONFIG, ICON) {
     };
     const paint = () => { go.textContent = signUp ? t("إنشاء حساب", "Create account") : t("تسجيل الدخول", "Sign in"); toggle.textContent = signUp ? t("لدي حساب", "I have an account") : t("حساب جديد", "New account"); };
     paint();
-    toggle.onclick = () => { signUp = !signUp; forgot.hidden = signUp; paint(); };
+    toggle.onclick = () => { signUp = !signUp; forgot.hidden = signUp; firstName.hidden = !signUp; paint(); };
     go.onclick = async () => {
+      if (signUp && !firstName.value.trim()) { msg.textContent = t("اكتب اسمك الأول.", "Enter your first name."); return; }
       go.disabled = true; msg.textContent = "";
-      try { await (signUp ? fb.createUserWithEmailAndPassword : fb.signInWithEmailAndPassword)(fb.auth, email.value.trim(), pass.value); }
+      try {
+        if (signUp) {
+          pendingName = firstName.value.trim();
+          const made = await fb.createUserWithEmailAndPassword(fb.auth, email.value.trim(), pass.value);
+          await fb.updateProfile(made.user, { displayName: pendingName });
+          openShared(made.user);
+        } else await fb.signInWithEmailAndPassword(fb.auth, email.value.trim(), pass.value);
+      }
       catch (e) { msg.textContent = errorText(e); }
       go.disabled = false;
     };
     stage.replaceChildren(node("div", { class: "center" },
       node("img", { src: ICON, alt: "" }), node("h2", {}, CONFIG.name), node("p", { class: "muted" }, t("سجّل دخولك للمتابعة", "Sign in to continue")),
-      email, pass, go, toggle, forgot, msg));
+      firstName, email, pass, go, toggle, forgot, msg));
+  }
+  let pendingName = "";
+
+  /** Accounts made before first names were asked for give one, so the app's owner knows who they are. */
+  function nameView(user) {
+    const input = node("input", { placeholder: t("الاسم الأول", "First name"), autocomplete: "given-name", maxlength: "40" });
+    const save = node("button", { class: "btn" }, t("حفظ", "Save"));
+    const msg = node("p", { class: "muted" });
+    save.onclick = async () => {
+      const name = input.value.trim();
+      if (!name) { msg.textContent = t("اكتب اسمك الأول.", "Enter your first name."); return; }
+      save.disabled = true;
+      try {
+        await fb.updateProfile(user, { displayName: name });
+        await fb.setDoc(fb.doc(db, "apps", CONFIG.appId, "members", user.uid), { name }, { merge: true }).catch(() => {});
+        openShared(user);
+      } catch (e) { msg.textContent = errorText(e); save.disabled = false; }
+    };
+    stage.replaceChildren(node("div", { class: "center" }, node("img", { src: ICON, alt: "" }),
+      node("h2", {}, t("اكتب اسمك الأول", "Enter your first name")),
+      node("p", { class: "muted" }, t("حتى يعرفك صاحب التطبيق ويرى ما أضفته.", "So the app's owner knows who you are and what you added.")),
+      input, save, msg));
   }
 
-  fb.onAuthStateChanged(fb.auth, user => (user ? openShared(user) : loginView()));
+  fb.onAuthStateChanged(fb.auth, user => {
+    if (!user) return loginView();
+    if (pendingName) return; // the new account's name is being saved, then it opens
+    (user.displayName || "").trim() ? openShared(user) : nameView(user);
+  });
 }
