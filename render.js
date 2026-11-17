@@ -112,6 +112,19 @@ export function sortRows(rows, numbers, column, descending) {
   });
 }
 
+/** A table's filter (see FormLogic.rowsMatching): part of a cell with contains, every column with anyColumn. */
+export function rowsMatching(rows, column, wanted, contains, anyColumn) {
+  const values = String(wanted || "").split(/[,،]/).map(normalize).filter(Boolean);
+  const hit = cell => { const v = normalize(cell ?? ""); return values.some(x => (contains ? v.includes(x) : v === x)); };
+  const out = [];
+  for (let n = 2; n <= rows.length; n++) {
+    const row = rows[n - 1] || [];
+    if (!row.some(v => String(v).trim())) continue;
+    if (!values.length || (column != null ? hit(row[column]) : anyColumn ? row.some(hit) : true)) out.push(n);
+  }
+  return out;
+}
+
 /** Data rows (Excel numbers) whose column equals one of the comma-separated values (all rows without a column). */
 export function rowsWhere(rows, column, wanted) {
   const values = String(wanted || "").split(/[,،]/).map(normalize).filter(Boolean);
@@ -583,6 +596,10 @@ export function runScreen(root, project, screen, store, opts) {
     return listOptions(prop(c, "items"), rows, index(prop(c, "optionsColumn")),
       parent ? index(prop(parent, "optionsColumn")) ?? index(prop(parent, "column")) : null, parent ? toExcel(parent) : null);
   };
+  // Tables filtered by a field (its value or the column it names) follow it as it changes.
+  const redrawFilteredBy = c => {
+    if (screen.components.some(o => o.type === "TABLE" && [prop(o, "filterField"), prop(o, "filterColumnField")].some(n => n && normalize(n) === normalize(c.name)))) tables.forEach(draw => draw());
+  };
   let filling = false;
   const sameForm = (a, b) => a && b && JSON.stringify(a) === JSON.stringify(b);
   const setValue = (c, v) => {
@@ -600,7 +617,7 @@ export function runScreen(root, project, screen, store, opts) {
         state.currentRow = null;
       }
     }
-    if (screen.components.some(o => o.type === "TABLE" && normalize(prop(o, "filterField")) === normalize(c.name))) tables.forEach(draw => draw());
+    redrawFilteredBy(c);
     // Lists that depend on this one show matching options and drop a choice that no longer fits.
     for (const child of screen.components) {
       if (byName(prop(child, "parentField")) !== c) continue;
@@ -937,7 +954,7 @@ export function runScreen(root, project, screen, store, opts) {
           readonly: bool(c, "readOnly") || bool(c, "autoNumber") || isCalculated(c), disabled: !enabled,
           type: { password: "password", email: "email", phone: "tel" }[type] || "text",
           inputmode: { number: "numeric", decimal: "decimal", phone: "tel", email: "email" }[type] || null,
-          oninput: e => { values[c.id] = e.target.value; markRange(); recompute(); suggest(); },
+          oninput: e => { values[c.id] = e.target.value; markRange(); recompute(); redrawFilteredBy(c); suggest(); },
           onblur: () => setTimeout(() => menu?.remove(), 200),
         };
         // Suggestions from the sheet while typing; picking one shows that record.
@@ -1123,12 +1140,13 @@ export function runScreen(root, project, screen, store, opts) {
           let numbers = null; // Excel row number of each grid line when filtered
           if (fromSheet) {
             const rows = state.sheetRows || [store.headers];
-            const fcol = prop(c, "filterColumn") ? headers.findIndex(x => normalize(x) === normalize(prop(c, "filterColumn"))) : -1;
-            if (fcol >= 0) {
-              const source = prop(c, "filterField") && screen.components.find(o => normalize(o.name) === normalize(prop(c, "filterField")));
-              const wanted = source ? toExcel(source) : prop(c, "filterValue");
-              numbers = rowsWhere(rows, fcol, wanted);
-            } else numbers = rowsWhere(rows, null, "");
+            // Advanced search: the column is the one chosen in a list (none or "all" = every column).
+            const columnField = byName(prop(c, "filterColumnField"));
+            const colName = columnField ? toExcel(columnField) : prop(c, "filterColumn");
+            const fcol = colName ? headers.findIndex(x => normalize(x) === normalize(colName)) : -1;
+            const source = byName(prop(c, "filterField"));
+            const wanted = source ? toExcel(source) : prop(c, "filterValue");
+            numbers = rowsMatching(rows, fcol >= 0 ? fcol : null, wanted, prop(c, "filterMatch") === "contains", !!columnField);
             if (sort.column >= 0) numbers = sortRows(rows, numbers, sort.column, sort.descending);
             numbers = [1, ...numbers].slice(0, 501);
             grid = numbers.map(n => rows[n - 1]);
