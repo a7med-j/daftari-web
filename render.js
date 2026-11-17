@@ -90,6 +90,11 @@ export function duplicateRow(rows, column, value, except = null) {
   return null;
 }
 
+/** The choices in a multiple-choice value ("A, B" or "A، B"), see FormLogic.choicesOf. */
+export const choicesOf = value => String(value ?? "").split(/[,،]/).map(x => x.trim()).filter(Boolean);
+/** Picked choices in the options' order (others at the end), joined with commas as saved in Excel. */
+export const joinChoices = (options, picked) => [...options.filter(o => picked.has(o)), ...[...picked].filter(p => !options.includes(p))].join(", ");
+
 /** A number typed with Arabic or Western digits ("٢٥", "1,250.5"), or null (see FormLogic.numberOf). */
 export function numberOf(text) {
   const v = String(text ?? "").trim().replace(/[٠-٩]/g, d => "٠١٢٣٤٥٦٧٨٩".indexOf(d)).replace(/٫/g, ".").replace(/[,،]/g, "");
@@ -805,7 +810,9 @@ export function runScreen(root, project, screen, store, opts) {
     for (const child of screen.components) {
       if (byName(prop(child, "parentField")) !== c) continue;
       optionRefreshers[child.id]?.();
-      if (values[child.id] && !optionsFor(child).includes(values[child.id])) setValue(child, "");
+      const opts2 = optionsFor(child);
+      const fits = bool(child, "multiSelect") ? choicesOf(values[child.id]).every(v => opts2.includes(v)) : opts2.includes(values[child.id]);
+      if (values[child.id] && !fits) setValue(child, "");
     }
   };
   const fill = row => {
@@ -1245,6 +1252,36 @@ export function runScreen(root, project, screen, store, opts) {
       }
       case "DROPDOWN": {
         let items = optionsFor(c);
+        if (bool(c, "multiSelect")) {
+          // Multiple choice: ticked in a list, saved as "A, B, C".
+          const label = h("span", { ...style, flex: "1", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }, { dir: "auto" });
+          const show = v => { label.textContent = v || prop(c, "hint"); label.style.opacity = v ? "1" : ".55"; };
+          show(values[c.id]);
+          inputs[c.id] = show;
+          optionRefreshers[c.id] = () => { items = optionsFor(c); };
+          const el = frame({ cursor: enabled ? "pointer" : "default" });
+          el.append(label, h("span", { ...style, flex: "0 0 auto", opacity: ".6" }, {}, "▾"));
+          if (enabled) el.onclick = () => {
+            const picked = new Set(choicesOf(values[c.id]));
+            const close = () => overlay.remove();
+            const list = h("div", { maxHeight: "55vh", overflow: "auto" }, {}, ...items.map(item => {
+              const box = h("input", { width: "18px", height: "18px" }, { type: "checkbox", onchange: e => { e.target.checked ? picked.add(item) : picked.delete(item); } });
+              box.checked = picked.has(item);
+              return h("label", { display: "flex", alignItems: "center", gap: "10px", padding: "8px 2px", cursor: "pointer", borderBottom: "1px solid #ffffff14" }, {}, box, item);
+            }));
+            const overlay = h("div", { position: "fixed", inset: "0", background: "#0008", display: "flex", alignItems: "center", justifyContent: "center", zIndex: "50" },
+              { dir: lang === "en" ? "ltr" : "rtl", onclick: e => { if (e.target === overlay) close(); } },
+              h("div", { background: "#172C24", color: "#fff", borderRadius: "14px", padding: "16px", width: "min(92vw, 380px)" }, {},
+                h("div", { fontWeight: "bold", marginBottom: "8px" }, {}, prop(c, "hint") || t("اختر", "Choose")),
+                list,
+                h("div", { display: "flex", gap: "16px", justifyContent: "flex-end", marginTop: "10px" }, {},
+                  h("button", { background: "none", border: "0", color: "#9FB5AA", fontSize: "15px", cursor: "pointer" }, { onclick: close }, t("إلغاء", "Cancel")),
+                  h("button", { background: "none", border: "0", color: "#20B879", fontSize: "15px", cursor: "pointer", fontWeight: "bold" },
+                    { onclick: () => { close(); setValue(c, joinChoices(items, picked)); } }, t("تم", "Done")))));
+            document.body.append(overlay);
+          };
+          return el;
+        }
         const select = h("select", { ...style, width: "100%", height: "100%", border: "none", background: "transparent", outline: "none" },
           { disabled: !enabled, onchange: e => setValue(c, e.target.value) });
         const sync = v => {
