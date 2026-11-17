@@ -10,7 +10,7 @@ import {
   getFirestore, doc, getDoc, setDoc, deleteDoc, collection, getDocs, query, where, runTransaction, serverTimestamp, Bytes,
 } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore.js";
 import { firebaseConfig } from "./config.js";
-import { runApp } from "./render.js";
+import { runApp, useAppManifest } from "./render.js";
 
 const fb = initializeApp(firebaseConfig);
 const auth = getAuth(fb);
@@ -263,6 +263,8 @@ async function appView(user, appId) {
       const data = snap.data();
       const project = JSON.parse(data.json);
       document.title = project.name;
+      // "Add to home screen" now opens this app directly.
+      useAppManifest(project.name, location.pathname + "?app=" + encodeURIComponent(appId), project.icon || "icon-512.png");
       // The owner and members the owner made editors may change records; other members only look.
       const canEdit = data.ownerUid === user.uid || (await getDoc(doc(db, "apps", appId, "members", user.uid))).data()?.role === "editor";
       const requestAccess = () => setDoc(doc(db, "apps", appId, "requests", user.uid), { email: user.email || "", at: Date.now() });

@@ -314,6 +314,31 @@ export function fileIdByName(project, name) {
   return (project.files || []).find(f => [f.name, f.link?.fileName, f.link?.sheet].some(x => x && key(x) === n))?.id ?? null;
 }
 
+/**
+ * Lets the phone add this app to its home screen as its own app: a manifest with the app's name
+ * and icon that opens straight on [startUrl] (not on Waraqa's home page).
+ */
+export function useAppManifest(name, startUrl, icon) {
+  if (!/^https?:$/.test(location.protocol)) return;
+  const abs = u => new URL(u, location.href).href;
+  const iconUrl = abs(icon || "icon-512.png");
+  const type = /^data:image\/svg|\.svg$/i.test(iconUrl) ? "image/svg+xml" : "image/png";
+  const manifest = {
+    name, short_name: name.slice(0, 24), start_url: abs(startUrl), scope: abs("./"), id: abs(startUrl),
+    display: "standalone", background_color: "#10251F", theme_color: "#10251F",
+    dir: document.documentElement.dir || "rtl", lang: document.documentElement.lang || "ar",
+    icons: [{ src: iconUrl, sizes: "192x192", type, purpose: "any" }, { src: iconUrl, sizes: "512x512", type, purpose: "any" }],
+  };
+  let link = document.querySelector('link[rel="manifest"]');
+  if (!link) { link = document.createElement("link"); link.rel = "manifest"; document.head.append(link); }
+  link.href = URL.createObjectURL(new Blob([JSON.stringify(manifest)], { type: "application/manifest+json" }));
+  for (const [n, v] of [["apple-mobile-web-app-capable", "yes"], ["mobile-web-app-capable", "yes"], ["apple-mobile-web-app-title", name]]) {
+    let m = document.querySelector(`meta[name="${n}"]`);
+    if (!m) { m = document.createElement("meta"); m.name = n; document.head.append(m); }
+    m.content = v;
+  }
+}
+
 const esc = s => String(s ?? "").replace(/[&<>"]/g, ch => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[ch]);
 
 /** Opens a printable report in a new tab (the browser's print dialog can save it as PDF). */

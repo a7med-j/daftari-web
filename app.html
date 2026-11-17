@@ -40,6 +40,7 @@ html, body { margin: 0; min-height: 100%; background: var(--ink); color: #fff; f
 // A web app exported from Waraqa, opened by its link: app.html?id=<project id>. Its design, name and
 // icon are public (webApps/{id}); its data stays in this browser or behind sign-in on the cloud table.
 import { runStandalone } from "./standalone.js";
+import { useAppManifest } from "./render.js";
 import { firebaseConfig } from "./config.js";
 
 const stage = document.getElementById("stage");
@@ -63,6 +64,7 @@ try {
   const icon = value(f.icon) || "icon-192.png";
   document.getElementById("icon").href = icon;
   document.getElementById("touchIcon").href = icon;
+  useAppManifest(config.name, location.href, icon);
   runStandalone(config, icon);
 } catch (e) {
   say("لم يُعثر على هذا التطبيق. تأكد من الرابط أو اطلب رابطًا جديدًا من صاحبه.", "This app wasn't found. Check the link or ask its owner for a new one.");
