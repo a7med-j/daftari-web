@@ -1158,7 +1158,15 @@ export function runScreen(root, project, screen, store, opts) {
           readonly: bool(c, "readOnly") || bool(c, "autoNumber") || isCalculated(c), disabled: !enabled,
           type: { password: "password", email: "email", phone: "tel" }[type] || "text",
           inputmode: { number: "numeric", decimal: "decimal", phone: "tel", email: "email" }[type] || null,
-          oninput: e => { values[c.id] = e.target.value; markRange(); recompute(); redrawFilteredBy(c); suggest(); },
+          oninput: e => {
+            // "No spaces": spaces typed or pasted are dropped as they come.
+            if (bool(c, "noSpaces") && /\s/.test(e.target.value)) {
+              const at = e.target.value.slice(0, e.target.selectionEnd ?? e.target.value.length).replace(/\s/g, "").length;
+              e.target.value = e.target.value.replace(/\s/g, "");
+              try { e.target.setSelectionRange(at, at); } catch (_) {}
+            }
+            values[c.id] = e.target.value; markRange(); recompute(); redrawFilteredBy(c); suggest();
+          },
           onblur: () => setTimeout(() => menu?.remove(), 200),
         };
         // Suggestions from the sheet while typing; picking one shows that record.
