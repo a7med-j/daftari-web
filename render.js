@@ -57,7 +57,9 @@ export function listOptions(items, rows, column, parentColumn, parentValue) {
 
 /** The next serial number in a column (see FormLogic.nextNumber). */
 /** Fields whose value is worked out (a formula, or filled from a file). */
-const isCalculated = c => !!prop(c, "formula").trim() || !!(prop(c, "lookupField") && prop(c, "lookupColumn"));
+const isLookup = c => !!(prop(c, "lookupField") && prop(c, "lookupColumn"));
+/** Fields shown worked out and not typed into: formulas, and labels filled from a file. Filled fields stay editable. */
+const isCalculated = c => !!prop(c, "formula").trim() || (c.type === "LABEL" && isLookup(c));
 
 /** Fields filled from a file by another field's value, like FormLogic.lookups (VLOOKUP). */
 export function lookups(screen, valueOf, rowsOf) {
@@ -504,8 +506,18 @@ export function runScreen(root, project, screen, store, opts) {
   let computed = {};
   const formulaShown = {}; // component id -> function(text) for calculated fields
   const rowsOf = id => (id === fileId ? state.sheetRows : otherRows[id]);
+  const lastLooked = {}; // field id -> the value last found for it in a file
   const recompute = () => {
-    computed = { ...computeFormulas(screen, c => (c.type === "LABEL" ? c.text : values[c.id] ?? "")), ...lookups(screen, c => values[c.id] ?? "", rowsOf) };
+    const looked = lookups(screen, c => values[c.id] ?? "", rowsOf);
+    const labels = {};
+    for (const [id, v] of Object.entries(looked)) {
+      if (screen.components.find(o => o.id === id)?.type === "LABEL") { labels[id] = v; continue; }
+      // A field filled from a file takes the found value when its key changes, and can still be typed over.
+      const before = lastLooked[id];
+      if (before === undefined ? v !== "" && !(values[id] || "").trim() : before !== v) { values[id] = v; inputs[id]?.(v); }
+      lastLooked[id] = v;
+    }
+    computed = { ...computeFormulas(screen, c => (c.type === "LABEL" ? c.text : values[c.id] ?? "")), ...labels };
     for (const [id, show] of Object.entries(formulaShown)) show(computed[id] ?? "");
     refreshShownLater();
   };
