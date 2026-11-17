@@ -227,6 +227,7 @@ export async function runStandalone(CONFIG, ICON) {
         snapshot = docs.flatMap(d => readRows(d.data().rows).map(r => ({ ...r, chunk: d.id })));
         return [headers, ...snapshot.map(r => r.c)];
       },
+      authors() { return snapshot.map(r => r.by || ""); },
       async append(values) {
         const width = Math.max(headers.length, ...Object.keys(values).map(k => Number(k) + 1));
         const cells = Array.from({ length: width }, (_, i) => values[i] ?? "");
@@ -287,7 +288,8 @@ export async function runStandalone(CONFIG, ICON) {
         [t("تصدير البيانات إلى Excel", "Export data to Excel"), () => exportExcel(store)],
         [t("تسجيل الخروج", "Sign out"), () => fb.signOut(fb.auth)],
       ]);
-      runApp(stage, latest, store, { lang, t, toast, confirm: confirmBox, errorText, canEdit, requestAccess, storeFor, onScreen: screen => { document.body.style.background = bg(screen); } });
+      runApp(stage, latest, store, { lang, t, toast, confirm: confirmBox, errorText, canEdit, requestAccess, storeFor,
+        user: { uid: user.uid, name: (user.displayName || pendingName || "").trim(), email: user.email || "" }, onScreen: screen => { document.body.style.background = bg(screen); } });
     } catch (e) {
       stage.replaceChildren(node("div", { class: "center" }, node("p", {}, errorText(e)),
         node("button", { class: "lnk", onclick: () => fb.signOut(fb.auth) }, t("تسجيل الخروج", "Sign out"))));

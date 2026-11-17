@@ -160,6 +160,8 @@ export function statistic(rows, numbers, kind, column) {
   if (kind === "min") return nums.length ? formatNumber(Math.min(...nums)) : "—";
   return "";
 }
+/** Labels may show the signed-in user's first name with {name} or {الاسم}. */
+const withUserName = (text, user) => String(text ?? "").replace(/\{(name|الاسم)\}/g, (user && (user.name || user.email)) || "");
 const withStatistic = (text, value) => (text.includes("{}") ? text.replaceAll("{}", value) : text.trim() ? text + " " + value : value);
 
 export function nextNumber(rows, column, prefix, digits) {
@@ -639,7 +641,8 @@ export function runScreen(root, project, screen, store, opts) {
   // The file this screen saves to ("" = main); other files are only read (lookups, lists).
   const fileId = (project.files || []).some(f => f.id === (screen.properties || {}).dataFile) ? screen.properties.dataFile : "";
   const mainStore = store;
-  const storeOf = id => (id ? opts.storeFor?.(id) || null : mainStore);
+  const storeCache = {};
+  const storeOf = id => (id ? (storeCache[id] ??= opts.storeFor?.(id) || null) : mainStore);
   if (fileId) store = storeOf(fileId);
   const otherRows = {};
   const headers = store ? store.headers : [];
@@ -719,7 +722,7 @@ export function runScreen(root, project, screen, store, opts) {
     const s = storeOf(id);
     if (s && !loadingFiles.has(id)) {
       loadingFiles.add(id);
-      s.rows().then(rows => { otherRows[id] = rows; tables.forEach(draw => draw()); }).catch(e => toast(opts.errorText(e))).finally(() => loadingFiles.delete(id));
+      s.rows().then(rows => { otherRows[id] = rows; tables.forEach(draw => draw()); statLabels.forEach(update => update()); }).catch(e => toast(opts.errorText(e))).finally(() => loadingFiles.delete(id));
     }
     return s ? [s.headers || []] : null;
   };
@@ -1134,15 +1137,27 @@ export function runScreen(root, project, screen, store, opts) {
       case "LABEL": {
         const max = Math.trunc(num(c, "maxLines"));
         const el = frame({ justifyContent: justify(prop(c, "textAlign")) });
-        const text = h("div", { ...style, width: "100%", whiteSpace: "pre-wrap", ...(max > 0 ? { display: "-webkit-box", WebkitLineClamp: String(max), WebkitBoxOrient: "vertical", overflow: "hidden" } : {}) }, { dir: "auto" }, c.text);
+        const shownText = withUserName(c.text, opts.user);
+        const text = h("div", { ...style, width: "100%", whiteSpace: "pre-wrap", ...(max > 0 ? { display: "-webkit-box", WebkitLineClamp: String(max), WebkitBoxOrient: "vertical", overflow: "hidden" } : {}) }, { dir: "auto" }, shownText);
         if (isCalculated(c)) formulaShown[c.id] = v => { text.textContent = v; };
         if (prop(c, "stat")) {
-          const colOfName = name => { const i = headers.findIndex(x => normalize(x) === normalize(name)); return i < 0 ? null : i; };
+          // The file counted: the screen's own unless another is chosen ("@main" = the main file).
+          const chosen = prop(c, "statFile");
+          const file = chosen === "@main" ? "" : chosen && (project.files || []).some(f => f.id === chosen) ? chosen : fileId;
           const update = () => {
-            const rows = state.sheetRows;
-            if (!rows) { text.textContent = withStatistic(c.text || "", "…"); return; }
-            const numbers = rowsWhere(rows, prop(c, "statFilterColumn") ? colOfName(prop(c, "statFilterColumn")) : null, prop(c, "statFilterValue"));
-            text.textContent = withStatistic(c.text || "", statistic(rows, numbers, prop(c, "stat"), prop(c, "statColumn") ? colOfName(prop(c, "statColumn")) : null));
+            const rows = file === fileId ? state.sheetRows : rowsFor(file);
+            if (!rows || rows.length < 1) { text.textContent = withStatistic(shownText || "", "…"); return; }
+            const head = rows[0] || [];
+            const colOfName = name => { const i = head.findIndex(x => normalize(x) === normalize(name)); return i < 0 ? null : i; };
+            let numbers = rowsWhere(rows, prop(c, "statFilterColumn") ? colOfName(prop(c, "statFilterColumn")) : null, prop(c, "statFilterValue"));
+            let kind = prop(c, "stat");
+            if (kind === "mine") {
+              // Records added by whoever is signed in (all of them when records keep no author, e.g. on this device only).
+              const authors = (file === fileId ? store : storeOf(file))?.authors?.();
+              if (authors && opts.user) numbers = numbers.filter(n => authors[n - 2] === opts.user.uid);
+              kind = "count";
+            }
+            text.textContent = withStatistic(shownText || "", statistic(rows, numbers, kind, prop(c, "statColumn") ? colOfName(prop(c, "statColumn")) : null));
           };
           statLabels.push(update);
           update();

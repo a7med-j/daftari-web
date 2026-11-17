@@ -97,6 +97,8 @@ function cloudStore(appId, headers, fileId = "") {
       snapshot = docs.flatMap(d => readRows(d.data().rows).map(r => ({ ...r, chunk: d.id })));
       return [headers, ...snapshot.map(r => r.c)];
     },
+    /** Who added each record of the last read (uid; "" for older records), index 0 = row 2. */
+    authors() { return snapshot.map(r => r.by || ""); },
     async append(values) {
       const width = Math.max(headers.length, ...Object.keys(values).map(k => Number(k) + 1));
       const cells = Array.from({ length: width }, (_, i) => values[i] ?? "");
@@ -278,6 +280,7 @@ async function appView(user, appId) {
       const storeFor = id => { const f = (project.files || []).find(x => x.id === id); return f ? cloudStore(appId, f.link.headers || [], id) : null; };
       const app = runApp(stage, project, cloudStore(appId, data.headers || []), {
         storeFor,
+        user: { uid: user.uid, name: (user.displayName || "").trim(), email: user.email || "" },
         lang, t, toast, confirm: confirmBox, errorText, canEdit, requestAccess,
         onScreen: screen => { wrap.style.background = cssBackground(screen); },
       });
