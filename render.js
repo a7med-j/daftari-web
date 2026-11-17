@@ -15,7 +15,7 @@ const COMMON = {
 
 const BY_TYPE = {
   BUTTON: { textColor: "#FFFFFFFF", textAlign: "center", backgroundColor: "#FF20B879", borderWidth: "0" },
-  TEXT_FIELD: { hint: "اكتب هنا", hintColor: "#FF8A9A92", inputType: "text", maxLength: "0", readOnly: "false", required: "false", suggestAfter: "1" },
+  TEXT_FIELD: { hint: "اكتب هنا", hintColor: "#FF8A9A92", inputType: "text", maxLength: "0", readOnly: "false", required: "false", suggestAfter: "1", minValue: "", maxValue: "" },
   LABEL: { fontSize: "16", backgroundColor: "#00FFFFFF", borderWidth: "0", maxLines: "0" },
   DROPDOWN: { items: "خيار 1\nخيار 2\nخيار 3", selectedIndex: "-1", hint: "اختر" },
   TABLE: {
@@ -80,6 +80,23 @@ export function lookups(screen, valueOf, rowsOf) {
     out[c.id] = row ? String(row[valueCol] ?? "") : "";
   }
   return out;
+}
+
+/** A number typed with Arabic or Western digits ("٢٥", "1,250.5"), or null (see FormLogic.numberOf). */
+export function numberOf(text) {
+  const v = String(text ?? "").trim().replace(/[٠-٩]/g, d => "٠١٢٣٤٥٦٧٨٩".indexOf(d)).replace(/٫/g, ".").replace(/[,،]/g, "");
+  const n = v === "" ? NaN : Number(v);
+  return Number.isFinite(n) ? n : null;
+}
+
+/** Why a value breaks the lowest / highest number, or null when fine (see FormLogic.rangeProblem). */
+export function rangeProblem(value, min, max, english) {
+  const low = numberOf(min), high = numberOf(max);
+  if (!String(value ?? "").trim() || (low == null && high == null)) return null;
+  const range = low != null && high != null ? (english ? `between ${low} and ${high}` : `بين ${low} و ${high}`)
+    : low != null ? (english ? `at least ${low}` : `لا يقل عن ${low}`) : (english ? `at most ${high}` : `لا يزيد عن ${high}`);
+  const n = numberOf(value);
+  return n == null || (low != null && n < low) || (high != null && n > high) ? range : null;
 }
 
 /** Row numbers ordered by a column: numbers by value, text alphabetically, empty cells last (see FormLogic.sortRows). */
@@ -607,6 +624,15 @@ export function runScreen(root, project, screen, store, opts) {
     .filter(([c]) => ["TEXT_FIELD", "PHOTO", "RADIO", "SIGNATURE", "LOCATION"].includes(c.type) && bool(c, "required") && !bool(c, "autoNumber")
       && !(values[c.id] || "").trim() && isShown(c))
     .map(([c, col]) => headers[col] || c.name);
+  /** The first field whose number is outside its lowest / highest, as a message, or null. */
+  const rangeError = () => {
+    for (const [c, col] of binds) {
+      if (c.type !== "TEXT_FIELD" || !isShown(c)) continue;
+      const range = rangeProblem(values[c.id], prop(c, "minValue"), prop(c, "maxValue"), lang === "en");
+      if (range) return t(`«${headers[col] || c.name}» يجب أن يكون رقمًا ${range}.`, `"${headers[col] || c.name}" must be a number ${range}.`);
+    }
+    return null;
+  };
 
   async function reloadTables() {
     if (!store) return;
@@ -704,6 +730,7 @@ export function runScreen(root, project, screen, store, opts) {
         if (!String(keyValue).trim()) return toast(t("اختر قيمة الحقل المميّز أولًا.", "Fill in the identifying field first."));
         const missing = missingRequired();
         if (missing.length) return toast(t("املأ الحقول المطلوبة: ", "Fill in the required fields: ") + missing.join("، "));
+        if (rangeError()) return toast(rangeError());
         const rows = await store.rows();
         const found = searchAll(rows, { [keyCol]: keyValue })[0];
         if (found) { await store.update(found, formValues()); toast(t(`تم تحديث سجل «${keyValue}» ✓`, `"${keyValue}" updated ✓`)); }
@@ -712,6 +739,7 @@ export function runScreen(root, project, screen, store, opts) {
       } else if (action === "addRow") {
         const missing = missingRequired();
         if (missing.length) return toast(t("املأ الحقول المطلوبة: ", "Fill in the required fields: ") + missing.join("، "));
+        if (rangeError()) return toast(rangeError());
         if (Object.values(formValues()).every(v => !String(v).trim())) return toast(t("الحقول فارغة.", "The fields are empty."));
         // Serial numbers: one more than the largest already in the column.
         const numbered = binds.filter(([c]) => bool(c, "autoNumber") && !(values[c.id] || "").trim());
@@ -745,6 +773,7 @@ export function runScreen(root, project, screen, store, opts) {
         if (row == null) return toast(t("ابحث عن الصف أولًا ثم عدّله.", "Search for the row first, then edit it."));
         const missing = missingRequired();
         if (missing.length) return toast(t("املأ الحقول المطلوبة: ", "Fill in the required fields: ") + missing.join("، "));
+        if (rangeError()) return toast(rangeError());
         await store.update(row, formValues());
         state.filledSnapshot = formValues();
         toast(t(`تم حفظ التعديل على الصف ${row} ✓`, `Row ${row} updated ✓`));
@@ -908,7 +937,7 @@ export function runScreen(root, project, screen, store, opts) {
           readonly: bool(c, "readOnly") || bool(c, "autoNumber") || isCalculated(c), disabled: !enabled,
           type: { password: "password", email: "email", phone: "tel" }[type] || "text",
           inputmode: { number: "numeric", decimal: "decimal", phone: "tel", email: "email" }[type] || null,
-          oninput: e => { values[c.id] = e.target.value; recompute(); suggest(); },
+          oninput: e => { values[c.id] = e.target.value; markRange(); recompute(); suggest(); },
           onblur: () => setTimeout(() => menu?.remove(), 200),
         };
         // Suggestions from the sheet while typing; picking one shows that record.
@@ -942,7 +971,10 @@ export function runScreen(root, project, screen, store, opts) {
           { ...style, width: "100%", height: "100%", border: "none", outline: "none", background: "transparent", resize: "none", padding: "0", fontFamily: style.fontFamily },
           attrs);
         input.value = values[c.id];
-        inputs[c.id] = v => { input.value = v; };
+        // Outside the lowest / highest number: shown in red until fixed.
+        const markRange = () => { input.style.color = rangeProblem(values[c.id], prop(c, "minValue"), prop(c, "maxValue"), lang === "en") ? "#D32F2F" : style.color || ""; };
+        markRange();
+        inputs[c.id] = v => { input.value = v; markRange(); };
         if (isCalculated(c)) formulaShown[c.id] = v => { input.value = v; };
         const el = frame({ alignItems: multiline ? "flex-start" : "center" });
         el.style.setProperty("--hint", cssColor(prop(c, "hintColor")));
