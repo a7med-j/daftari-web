@@ -46,6 +46,19 @@ export async function runStandalone(CONFIG, ICON) {
     menu.replaceChildren(...items.map(([label, fn]) => node("button", { onclick: () => { menu.style.display = "none"; fn(); } }, label)));
     menuBtn.style.display = items.length ? "block" : "none";
   };
+  // "Share the app": the phone's share sheet with the app's link, or the link copied.
+  const appLink = () => (/^https?:$/.test(location.protocol) ? location.href.split("#")[0] : CONFIG.link || "");
+  const shareApp = async () => {
+    const url = appLink();
+    if (!url) return toast(t("لا يوجد رابط لهذا التطبيق بعد.", "This app has no link yet."));
+    const text = t(`افتح تطبيق «${CONFIG.name}»:`, `Open the "${CONFIG.name}" app:`);
+    try {
+      if (navigator.share) return await navigator.share({ title: CONFIG.name, text, url });
+    } catch (e) { if (e && e.name === "AbortError") return; }
+    try { await navigator.clipboard.writeText(url); toast(t("تم نسخ رابط التطبيق، أرسله لمن تريد.", "The app's link was copied; send it to anyone.")); }
+    catch (e) { prompt(t("انسخ رابط التطبيق:", "Copy the app's link:"), url); }
+  };
+  const shareItem = [t("مشاركة التطبيق", "Share the app"), shareApp];
   menuBtn.onclick = () => { menu.style.display = menu.style.display === "block" ? "none" : "block"; };
   document.addEventListener("click", e => { if (e.target !== menuBtn && !menu.contains(e.target)) menu.style.display = "none"; });
 
@@ -176,7 +189,7 @@ export async function runStandalone(CONFIG, ICON) {
     if (navigator.storage?.persist) navigator.storage.persist().catch(() => {});
     const store = localStore();
     const extra = {};
-    setMenu([[t("تصدير البيانات إلى Excel", "Export data to Excel"), () => exportExcel(store)]]);
+    setMenu([shareItem, [t("تصدير البيانات إلى Excel", "Export data to Excel"), () => exportExcel(store)]]);
     runApp(stage, project, store, {
       lang, t, toast, confirm: confirmBox, errorText,
       storeFor: id => (project.files || []).some(f => f.id === id) ? (extra[id] ||= localStore(id)) : null,
@@ -286,6 +299,7 @@ export async function runStandalone(CONFIG, ICON) {
         (await fb.getDoc(fb.doc(db, "apps", CONFIG.appId, "members", user.uid))).data()?.role === "editor";
       const requestAccess = () => fb.setDoc(fb.doc(db, "apps", CONFIG.appId, "requests", user.uid), { email: user.email || "", name: (user.displayName || "").trim(), at: Date.now() });
       setMenu([
+        shareItem,
         [t("تصدير البيانات إلى Excel", "Export data to Excel"), () => exportExcel(store)],
         [t("تسجيل الخروج", "Sign out"), () => fb.signOut(fb.auth)],
       ]);
