@@ -228,6 +228,7 @@ export async function runStandalone(CONFIG, ICON) {
         return [headers, ...snapshot.map(r => r.c)];
       },
       authors() { return snapshot.map(r => r.by || ""); },
+      authorNames() { return snapshot.map(r => r.byName || ""); },
       async append(values) {
         const width = Math.max(headers.length, ...Object.keys(values).map(k => Number(k) + 1));
         const cells = Array.from({ length: width }, (_, i) => values[i] ?? "");

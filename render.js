@@ -31,6 +31,11 @@ const BY_TYPE = {
   RADIO: { items: "خيار 1\nخيار 2", selectedIndex: "-1", radioLayout: "horizontal", checkColor: "#FF20B879", required: "false", backgroundColor: "#00FFFFFF", borderWidth: "0" },
   TIME_PICKER: { timeFormat: "HH:mm", defaultNow: "false", backgroundColor: "#FFFFFFFF", borderWidth: "1" },
   SIGNATURE: { hint: "اضغط للتوقيع", required: "false", textColor: "#FF607D8B", textAlign: "center", fontSize: "13", backgroundColor: "#FFFFFFFF", borderWidth: "1" },
+  CHART: {
+    chartType: "column", chartTitle: "", chartFile: "", chartGroup: "", chartValue: "count", chartValueColumn: "", chartSort: "desc", chartLimit: "0",
+    chartLabels: "value", chartLegend: "auto", chartAxes: "true", chartGrid: "true", chartTrend: "false", chartHole: "55",
+    chartMulticolor: "false", chartColor: "#FF20B879", fontSize: "12", backgroundColor: "#FFFFFFFF", borderWidth: "1",
+  },
   LOCATION: { hint: "📍 تحديد الموقع", required: "false", textAlign: "center", backgroundColor: "#FFFFFFFF", borderWidth: "1" },
 };
 
@@ -160,6 +165,156 @@ export function statistic(rows, numbers, kind, column) {
   if (kind === "min") return nums.length ? formatNumber(Math.min(...nums)) : "—";
   return "";
 }
+// ---- Charts (see FormLogic.chartData and ChartView on Android) ----
+const CHART_PALETTE = ["#20B879", "#1565C0", "#EF6C00", "#8E24AA", "#C62828", "#00838F", "#F9A825", "#6D4C41", "#5C6BC0", "#43A047"];
+
+/** Records grouped per category, counted or summed / averaged / max / min, ordered and cut to a number of categories. */
+export function chartData(rows, numbers, labelOf, kind, valueColumn, sort, limit, other, empty) {
+  const groups = new Map();
+  for (const n of numbers) {
+    const label = String(labelOf(n) ?? "").trim() || empty;
+    if (!groups.has(label)) groups.set(label, []);
+    if (kind === "count") groups.get(label).push(1);
+    else if (valueColumn != null) { const v = numberOf((rows[n - 1] || [])[valueColumn]); if (v != null) groups.get(label).push(v); }
+  }
+  let points = [...groups].map(([label, vs]) => ({
+    label,
+    value: kind === "average" ? (vs.length ? vs.reduce((a, b) => a + b, 0) / vs.length : 0)
+      : kind === "max" ? (vs.length ? Math.max(...vs) : 0) : kind === "min" ? (vs.length ? Math.min(...vs) : 0) : vs.reduce((a, b) => a + b, 0),
+  }));
+  if (sort === "desc") points.sort((a, b) => b.value - a.value);
+  else if (sort === "asc") points.sort((a, b) => a.value - b.value);
+  else if (sort === "name") points.sort((a, b) => a.label.localeCompare(b.label));
+  if (limit > 0 && points.length > limit) {
+    const kept = points.slice(0, limit - 1);
+    points = [...kept, { label: other, value: points.slice(limit - 1).reduce((a, p) => a + p.value, 0) }];
+  }
+  return points;
+}
+
+const chartNumber = v => (Math.abs(v - Math.round(v)) < 1e-9 ? String(Math.round(v)) : String(Number(v.toFixed(2))));
+function niceScale(min, max) {
+  const span = max - min <= 0 ? (max === 0 ? 1 : Math.abs(max)) : max - min;
+  const raw = span / 4, mag = 10 ** Math.floor(Math.log10(raw));
+  const step = [1, 2, 2.5, 5, 10].map(x => x * mag).find(x => x >= raw);
+  const lo = Math.floor(min / step) * step, hi = Math.ceil(max / step) * step;
+  return [lo, hi <= lo ? lo + step : hi, step];
+}
+
+/** An SVG of the chart [c] for [points] in a w×h box. */
+function chartSvg(c, points, w, h, color, fontSize) {
+  const type = prop(c, "chartType"), round = type === "pie" || type === "donut";
+  const multicolor = round || bool(c, "chartMulticolor"), series = cssColor(prop(c, "chartColor"));
+  const colorAt = i => (multicolor ? CHART_PALETTE[i % CHART_PALETTE.length] : series);
+  const total = points.reduce((a, p) => a + Math.max(p.value, 0), 0);
+  const labels = prop(c, "chartLabels");
+  const labelOf = p => {
+    const pct = total > 0 ? chartNumber(Math.round(p.value / total * 1000) / 10) + "%" : "";
+    return labels === "percent" ? pct : labels === "both" ? `${chartNumber(p.value)} (${pct})` : labels === "none" ? "" : chartNumber(p.value);
+  };
+  const lh = fontSize * 1.3, out = [];
+  const text = (t, x, y, opts = {}) => out.push(`<text x="${x}" y="${y}" font-size="${opts.size || fontSize}" fill="${opts.fill || color}" text-anchor="${opts.anchor || "middle"}" dominant-baseline="${opts.base || "middle"}"${opts.bold ? ' font-weight="bold"' : ""}>${esc(t)}</text>`);
+  let top = 2, bottom = h - 2;
+  const left0 = 2, right0 = w - 2;
+  const title = prop(c, "chartTitle");
+  if (title.trim()) { text(title, w / 2, top + lh * 0.6, { size: fontSize * 1.2, bold: true }); top += lh * 1.5; }
+  if (!points.length) { text("—", w / 2, (top + bottom) / 2); return out.join(""); }
+  let legend = prop(c, "chartLegend");
+  if (legend === "auto") legend = round ? "bottom" : "none";
+  if (legend === "top" || legend === "bottom") {
+    // Approximate widths: a box, the label and a gap per entry, wrapped into rows.
+    const widths = points.map(p => lh * 0.7 + 4 + Math.min(p.label.length * fontSize * 0.6, (right0 - left0) / 2) + lh * 0.6);
+    const rowsL = [[]]; let used = 0;
+    widths.forEach((wd, i) => { if (used + wd > right0 - left0 && rowsL.at(-1).length) { rowsL.push([]); used = 0; } rowsL.at(-1).push(i); used += wd; });
+    const height = rowsL.length * lh * 1.2;
+    let y = legend === "top" ? top : bottom - height;
+    for (const row of rowsL) {
+      let x = (left0 + right0) / 2 - (row.reduce((a, i) => a + widths[i], 0) - lh * 0.6) / 2;
+      for (const i of row) {
+        out.push(`<rect x="${x}" y="${y + lh * 0.25}" width="${lh * 0.7}" height="${lh * 0.7}" fill="${colorAt(i)}"/>`);
+        text(points[i].label, x + lh * 0.7 + 4, y + lh * 0.6, { anchor: "start" });
+        x += widths[i];
+      }
+      y += lh * 1.2;
+    }
+    if (legend === "top") top += height + lh * 0.3; else bottom -= height + lh * 0.3;
+  }
+  if (round) {
+    const r = Math.min(right0 - left0, bottom - top) / 2;
+    if (r <= 2) return out.join("");
+    const cx = (left0 + right0) / 2, cy = (top + bottom) / 2;
+    const hole = type === "donut" ? Math.min(80, Math.max(20, num(c, "chartHole"))) / 100 : 0;
+    let start = -Math.PI / 2;
+    const pt = (a, rr) => `${cx + rr * Math.cos(a)},${cy + rr * Math.sin(a)}`;
+    points.forEach((p, i) => {
+      const sweep = total > 0 ? Math.max(p.value, 0) / total * 2 * Math.PI : 0;
+      if (sweep <= 0) return;
+      const end = start + Math.min(sweep, 2 * Math.PI - 1e-4), large = sweep > Math.PI ? 1 : 0;
+      const d = hole > 0
+        ? `M${pt(start, r)} A${r},${r} 0 ${large} 1 ${pt(end, r)} L${pt(end, r * hole)} A${r * hole},${r * hole} 0 ${large} 0 ${pt(start, r * hole)} Z`
+        : `M${cx},${cy} L${pt(start, r)} A${r},${r} 0 ${large} 1 ${pt(end, r)} Z`;
+      out.push(`<path d="${d}" fill="${colorAt(i)}"/>`);
+      if (labels !== "none" && sweep > 0.25) {
+        const mid = start + sweep / 2, at = hole > 0 ? r * (1 + hole) / 2 : r * 0.62;
+        text(labelOf(p), cx + at * Math.cos(mid), cy + at * Math.sin(mid), { fill: "#fff", bold: true });
+      }
+      start += sweep;
+    });
+    if (hole > 0 && total > 0) text(chartNumber(total), cx, cy, { size: fontSize * 1.3, bold: true });
+    return out.join("");
+  }
+  const axes = bool(c, "chartAxes"), horizontal = type === "bar";
+  const maxV = Math.max(...points.map(p => p.value), 0), minV = Math.min(...points.map(p => p.value), 0);
+  const [lo, hi, step] = niceScale(minV, maxV);
+  const valueW = axes ? chartNumber(hi).length * fontSize * 0.6 + lh * 0.5 : 0;
+  const catW = axes && horizontal ? Math.min(Math.max(...points.map(p => p.label.length)) * fontSize * 0.6 + lh * 0.4, (right0 - left0) * 0.35) : 0;
+  const pl = left0 + (horizontal ? catW : valueW), pr = right0 - (labels !== "none" && horizontal ? lh * 2.2 : lh * 0.3);
+  const pt0 = top + (labels !== "none" && !horizontal ? lh * 1.1 : lh * 0.3), pb = bottom - (axes ? lh * 1.3 : 0);
+  if (pr - pl < 10 || pb - pt0 < 10) return out.join("");
+  const px = v => (horizontal ? pl + (v - lo) / (hi - lo) * (pr - pl) : pb - (v - lo) / (hi - lo) * (pb - pt0));
+  for (let t = lo; t <= hi + step / 2; t += step) {
+    const p = px(t);
+    if (bool(c, "chartGrid")) out.push(horizontal ? `<line x1="${p}" y1="${pt0}" x2="${p}" y2="${pb}" stroke="${color}" stroke-opacity=".15"/>` : `<line x1="${pl}" y1="${p}" x2="${pr}" y2="${p}" stroke="${color}" stroke-opacity=".15"/>`);
+    if (axes) horizontal ? text(chartNumber(t), p, pb + lh * 0.6) : text(chartNumber(t), pl - lh * 0.25, p, { anchor: "end" });
+  }
+  const zero = px(0);
+  out.push(horizontal ? `<line x1="${zero}" y1="${pt0}" x2="${zero}" y2="${pb}" stroke="${color}" stroke-opacity=".5" stroke-width="1.5"/>` : `<line x1="${pl}" y1="${zero}" x2="${pr}" y2="${zero}" stroke="${color}" stroke-opacity=".5" stroke-width="1.5"/>`);
+  const n = points.length, slot = (horizontal ? pb - pt0 : pr - pl) / n;
+  const center = i => (horizontal ? pt0 : pl) + slot * (i + 0.5);
+  if (type === "line" || type === "area") {
+    const pts = points.map((p, i) => [center(i), px(p.value)]);
+    if (type === "area") out.push(`<path d="M${pts[0][0]},${zero} ${pts.map(q => "L" + q.join(",")).join(" ")} L${pts.at(-1)[0]},${zero} Z" fill="${series}" fill-opacity=".3"/>`);
+    out.push(`<polyline points="${pts.map(q => q.join(",")).join(" ")}" fill="none" stroke="${series}" stroke-width="3"/>`);
+    pts.forEach((q, i) => out.push(`<circle cx="${q[0]}" cy="${q[1]}" r="4.5" fill="${colorAt(i)}"/>`));
+  } else {
+    const thick = slot * 0.62;
+    points.forEach((p, i) => {
+      const v = px(p.value);
+      out.push(horizontal ? `<rect x="${Math.min(zero, v)}" y="${center(i) - thick / 2}" width="${Math.abs(v - zero)}" height="${thick}" fill="${colorAt(i)}"/>`
+        : `<rect x="${center(i) - thick / 2}" y="${Math.min(zero, v)}" width="${thick}" height="${Math.abs(v - zero)}" fill="${colorAt(i)}"/>`);
+    });
+  }
+  if (bool(c, "chartTrend") && n >= 2) {
+    const mx = (n - 1) / 2, my = points.reduce((a, p) => a + p.value, 0) / n;
+    let sxx = 0, sxy = 0;
+    points.forEach((p, i) => { sxx += (i - mx) ** 2; sxy += (i - mx) * (p.value - my); });
+    const slope = sxx ? sxy / sxx : 0, at = i => my + slope * (i - mx);
+    const [a, b] = horizontal ? [[px(at(0)), center(0)], [px(at(n - 1)), center(n - 1)]] : [[center(0), px(at(0))], [center(n - 1), px(at(n - 1))]];
+    out.push(`<line x1="${a[0]}" y1="${a[1]}" x2="${b[0]}" y2="${b[1]}" stroke="${color}" stroke-opacity=".7" stroke-width="2" stroke-dasharray="10 7"/>`);
+  }
+  points.forEach((p, i) => {
+    const v = px(p.value);
+    if (horizontal) {
+      text(labelOf(p), Math.max(v, zero) + lh * 0.25, center(i), { anchor: "start" });
+      if (axes) text(p.label.length * fontSize * 0.6 > catW ? p.label.slice(0, Math.max(1, Math.floor(catW / (fontSize * 0.6)) - 1)) + "…" : p.label, left0, center(i), { anchor: "start" });
+    } else {
+      text(labelOf(p), center(i), Math.min(v, zero) - lh * 0.5);
+      if (axes) text(p.label.length * fontSize * 0.6 > slot ? p.label.slice(0, Math.max(1, Math.floor(slot / (fontSize * 0.6)) - 1)) + "…" : p.label, center(i), pb + lh * 0.6);
+    }
+  });
+  return out.join("");
+}
+
 /** Labels may show the signed-in user's first name with {name} or {الاسم}. */
 const withUserName = (text, user) => String(text ?? "").replace(/\{(name|الاسم)\}/g, (user && (user.name || user.email)) || "");
 const withStatistic = (text, value) => (text.includes("{}") ? text.replaceAll("{}", value) : text.trim() ? text + " " + value : value);
@@ -863,7 +1018,7 @@ export function runScreen(root, project, screen, store, opts) {
       const s = storeOf(id);
       if (s) s.rows().then(rows => { otherRows[id] = rows; recompute(); Object.values(optionRefreshers).forEach(r => r()); }).catch(() => {});
     }
-    const listsFromSheet = screen.components.some(c => prop(c, "optionsColumn") || prop(c, "scan") === "record" || (c.type === "LABEL" && prop(c, "stat"))
+    const listsFromSheet = screen.components.some(c => c.type === "CHART" || prop(c, "optionsColumn") || prop(c, "scan") === "record" || (c.type === "LABEL" && prop(c, "stat"))
       || prop(c, "action") === "upsertRow" || prop(c, "lookupField"));
     if (!tables.length && !listsFromSheet) { state.sheetRows = null; return; } // suggestions read the sheet again when needed
     try {
@@ -1441,6 +1596,36 @@ export function runScreen(root, project, screen, store, opts) {
         };
         draw();
         if (fromSheet) tables.push(draw);
+        return el;
+      }
+      case "CHART": {
+        const el = frame();
+        const chosen = prop(c, "chartFile");
+        const file = chosen === "@main" ? "" : chosen && (project.files || []).some(f => f.id === chosen) ? chosen : fileId;
+        const draw = () => {
+          const rows = file === fileId ? state.sheetRows : rowsFor(file);
+          let points = [];
+          if (rows && rows.length) {
+            const head = rows[0] || [];
+            const col = name => { if (!name) return null; const i = head.findIndex(x => normalize(x) === normalize(name)); return i < 0 ? null : i; };
+            const numbers = rowsWhere(rows, col(prop(c, "statFilterColumn")), prop(c, "statFilterValue"));
+            const group = prop(c, "chartGroup");
+            let labelOf;
+            if (group === "@author") {
+              const s = file === fileId ? store : storeOf(file);
+              const names = s?.authorNames?.();
+              labelOf = n => (names ? names[n - 2] || t("سجلات قديمة", "Older records") : (opts.user?.name || t("أنا", "Me")));
+            } else {
+              const gc = col(group);
+              labelOf = n => (gc == null ? t("الكل", "All") : (rows[n - 1] || [])[gc]);
+            }
+            points = chartData(rows, numbers, labelOf, prop(c, "chartValue"), col(prop(c, "chartValueColumn")), prop(c, "chartSort"), Math.trunc(num(c, "chartLimit")), t("أخرى", "Other"), t("(فارغ)", "(blank)"));
+          }
+          const pad = num(c, "padding") || 0, w = Math.max(10, c.width - 2 * pad), h2 = Math.max(10, c.height - 2 * pad);
+          el.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" width="100%" height="100%" viewBox="0 0 ${w} ${h2}" style="font-family:inherit;direction:ltr">${chartSvg(c, points, w, h2, style.color, num(c, "fontSize"))}</svg>`;
+        };
+        draw();
+        tables.push(draw);
         return el;
       }
       case "IMAGE": {
