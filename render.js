@@ -82,6 +82,19 @@ export function lookups(screen, valueOf, rowsOf) {
   return out;
 }
 
+/** Row numbers ordered by a column: numbers by value, text alphabetically, empty cells last (see FormLogic.sortRows). */
+export function sortRows(rows, numbers, column, descending) {
+  const cell = n => String(rows[n - 1]?.[column] ?? "").trim();
+  const asNumber = v => { const x = Number(v.replace(/,/g, "")); return v !== "" && Number.isFinite(x) ? x : null; };
+  return [...numbers].sort((a, b) => {
+    const x = cell(a), y = cell(b);
+    if (!x || !y) return x ? -1 : y ? 1 : a - b;
+    const nx = asNumber(x), ny = asNumber(y);
+    const order = nx != null && ny != null ? nx - ny : x.localeCompare(y, ["ar", "en"], { numeric: true, sensitivity: "base" });
+    return (descending ? -order : order) || a - b;
+  });
+}
+
 /** Data rows (Excel numbers) whose column equals one of the comma-separated values (all rows without a column). */
 export function rowsWhere(rows, column, wanted) {
   const values = String(wanted || "").split(/[,،]/).map(normalize).filter(Boolean);
@@ -1072,6 +1085,7 @@ export function runScreen(root, project, screen, store, opts) {
       case "TABLE": {
         const el = h("div", { ...chrome(c), width: "100%", height: "100%", overflow: "auto" });
         const fromSheet = prop(c, "dataSource") === "sheet" && store;
+        const sort = { column: -1, descending: false }; // tapping a header sorts by it, again reverses
         const draw = () => {
           let grid;
           let numbers = null; // Excel row number of each grid line when filtered
@@ -1081,9 +1095,11 @@ export function runScreen(root, project, screen, store, opts) {
             if (fcol >= 0) {
               const source = prop(c, "filterField") && screen.components.find(o => normalize(o.name) === normalize(prop(c, "filterField")));
               const wanted = source ? toExcel(source) : prop(c, "filterValue");
-              numbers = [1, ...rowsWhere(rows, fcol, wanted)].slice(0, 501);
-              grid = numbers.map(n => rows[n - 1]);
-            } else grid = rows.slice(0, 501);
+              numbers = rowsWhere(rows, fcol, wanted);
+            } else numbers = rowsWhere(rows, null, "");
+            if (sort.column >= 0) numbers = sortRows(rows, numbers, sort.column, sort.descending);
+            numbers = [1, ...numbers].slice(0, 501);
+            grid = numbers.map(n => rows[n - 1]);
           } else {
             const cols = prop(c, "columns").split(",").map(s => s.trim()).filter(Boolean);
             grid = [cols.length ? cols : [""], ...Array.from({ length: Math.max(1, Math.trunc(num(c, "rows"))) }, () => cols.map(() => ""))];
@@ -1096,7 +1112,11 @@ export function runScreen(root, project, screen, store, opts) {
             fill(row);
             state.currentRow = number; state.lastCriteria = null; state.filledSnapshot = formValues();
             draw();
-          } : null));
+          } : null, fromSheet ? { ...sort, onSort: k => {
+            sort.descending = sort.column === k ? !sort.descending : false;
+            sort.column = k;
+            draw();
+          } } : null));
         };
         draw();
         if (fromSheet) tables.push(draw);
@@ -1194,7 +1214,7 @@ export function runApp(root, project, store, opts) {
 }
 
 /** Table from grid (line 0 = headers). Vertical orientation shows one column per record. */
-function drawTable(c, style, grid, currentRow, onPick) {
+function drawTable(c, style, grid, currentRow, onPick, sort = null) {
   const headers = grid[0] || [];
   const records = grid.slice(1);
   const fields = Math.max(headers.length, ...records.map(r => r.length), 1);
@@ -1207,6 +1227,13 @@ function drawTable(c, style, grid, currentRow, onPick) {
   const headBg = cssColor(prop(c, "headerColor"));
   const headStyle = { ...style, color: cssColor(prop(c, "headerTextColor")), fontWeight: 700, background: headBg };
   const striped = bool(c, "striped");
+  // Sortable headers show an arrow on the sorted column and sort when tapped.
+  const headCell = k => {
+    const arrow = sort && sort.column === k ? (sort.descending ? " ▼" : " ▲") : "";
+    const th = cell((headers[k] ?? "") + arrow, true, sort ? { cursor: "pointer", userSelect: "none" } : {});
+    if (sort) { th.title = "فرز"; th.addEventListener("click", () => sort.onSort(k)); }
+    return th;
+  };
   const cell = (text, head, extra = {}) => h(head ? "th" : "td", {
     ...(head ? headStyle : style), border: grid_, height: rowH + "px", padding: "0 4px", textAlign: align,
     whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", maxWidth: "1px", ...(minW > 0 ? { minWidth: minW + "px" } : {}), ...extra,
@@ -1214,7 +1241,7 @@ function drawTable(c, style, grid, currentRow, onPick) {
   const recordBg = i => i + 1 === currentRow - 1 ? "rgba(32,184,121,.3)" : (striped && i % 2 === 1 ? cssColor(prop(c, "gridColor")) : "transparent");
   const table = h("table", { borderCollapse: "collapse", width: minW > 0 ? "auto" : "100%", tableLayout: minW > 0 ? "auto" : "fixed" });
   if (!vertical) {
-    table.append(h("tr", {}, {}, numbers ? cell("#", true, { width: "34px", maxWidth: "none" }) : null, Array.from({ length: fields }, (_, i) => cell(headers[i] ?? "", true))));
+    table.append(h("tr", {}, {}, numbers ? cell("#", true, { width: "34px", maxWidth: "none" }) : null, Array.from({ length: fields }, (_, i) => headCell(i))));
     records.forEach((r, i) => table.append(h("tr", { background: recordBg(i), cursor: onPick ? "pointer" : "default" },
       { onclick: () => onPick && r.length && onPick(i + 1) },
       numbers ? cell(String(i + 1), false, { width: "34px", maxWidth: "none" }) : null,
@@ -1222,7 +1249,7 @@ function drawTable(c, style, grid, currentRow, onPick) {
   } else {
     if (numbers) table.append(h("tr", {}, {}, cell("#", true), records.map((_, i) => cell(String(i + 1), true))));
     for (let k = 0; k < fields; k++) {
-      table.append(h("tr", {}, {}, cell(headers[k] ?? "", true),
+      table.append(h("tr", {}, {}, headCell(k),
         records.map((r, i) => cell(r[k] ?? "", false, { background: recordBg(i), cursor: onPick ? "pointer" : "default" }))));
     }
     if (onPick) table.querySelectorAll("tr").forEach(tr => [...tr.children].slice(1).forEach((td, i) => td.addEventListener("click", () => records[i]?.length && onPick(i + 1))));
