@@ -939,7 +939,7 @@ export function runScreen(root, project, screen, store, opts) {
       if (action === "upsertRow") {
         const key = byName(button ? prop(button, "searchField") : "");
         const keyCol = key && binds.find(([b]) => b === key)?.[1];
-        if (keyCol == null) return toast(t("اختر في خصائص الزر «البحث بواسطة» الحقل الذي يميّز كل صف (مثل KKS).", "Choose in the button's \"Search by\" the field that identifies each row (like KKS)."));
+        if (keyCol == null) return toast(t("اختر في خصائص الزر «الحقل المميّز للسجل»، وهو الحقل الذي لا يتكرر في كل صف (مثل الرقم أو الكود).", "Choose the button's \"Key field of the record\": the field that is different in every row (like a number or code)."));
         const keyValue = toExcel(key);
         if (!String(keyValue).trim()) return toast(t("اختر قيمة الحقل المميّز أولًا.", "Fill in the identifying field first."));
         const missing = missingRequired();
