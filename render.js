@@ -846,6 +846,8 @@ export function runScreen(root, project, screen, store, opts) {
     const box = h("div", {
       position: "absolute", left: c.x + "px", top: c.y + "px", width: c.width + "px", height: c.height + "px",
       transform: `rotate(${num(c, "rotation")}deg)`,
+      // Labels and images used as backgrounds let taps through to the fields under them, like on the phone.
+      pointerEvents: c.type === "LABEL" || c.type === "IMAGE" ? "none" : "",
     }, { dir: lang === "en" ? "ltr" : "rtl" });
     box.append(drawComponent(c));
     boxes[c.id] = box;
