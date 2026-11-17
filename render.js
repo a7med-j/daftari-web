@@ -251,6 +251,69 @@ export async function compressPhoto(file, maxSide = 1280, maxBytes = 700000) {
   return new Uint8Array(await blob.arrayBuffer());
 }
 
+// ---- Excel file of table rows (a minimal .xlsx: inline strings, numbers as numbers) ----
+const xlsxCrcTable = Array.from({ length: 256 }, (_, n) => { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xEDB88320 ^ (c >>> 1) : c >>> 1; return c >>> 0; });
+const xlsxCrc32 = bytes => { let c = 0xFFFFFFFF; for (const b of bytes) c = xlsxCrcTable[(c ^ b) & 0xFF] ^ (c >>> 8); return (c ^ 0xFFFFFFFF) >>> 0; };
+function xlsxZip(files) {
+  const enc = new TextEncoder(), parts = [], central = [];
+  let offset = 0;
+  for (const [name, text] of files) {
+    const data = enc.encode(text), nameBytes = enc.encode(name), crc = xlsxCrc32(data);
+    const local = new DataView(new ArrayBuffer(30));
+    local.setUint32(0, 0x04034b50, true); local.setUint16(4, 20, true); local.setUint16(8, 0, true);
+    local.setUint32(14, crc, true); local.setUint32(18, data.length, true); local.setUint32(22, data.length, true); local.setUint16(26, nameBytes.length, true);
+    parts.push(new Uint8Array(local.buffer), nameBytes, data);
+    const cd = new DataView(new ArrayBuffer(46));
+    cd.setUint32(0, 0x02014b50, true); cd.setUint16(4, 20, true); cd.setUint16(6, 20, true);
+    cd.setUint32(16, crc, true); cd.setUint32(20, data.length, true); cd.setUint32(24, data.length, true); cd.setUint16(28, nameBytes.length, true);
+    cd.setUint32(42, offset, true);
+    central.push(new Uint8Array(cd.buffer), nameBytes);
+    offset += 30 + nameBytes.length + data.length;
+  }
+  const size = central.reduce((s, p) => s + p.length, 0);
+  const end = new DataView(new ArrayBuffer(22));
+  end.setUint32(0, 0x06054b50, true); end.setUint16(8, files.length, true); end.setUint16(10, files.length, true);
+  end.setUint32(12, size, true); end.setUint32(16, offset, true);
+  return new Blob([...parts, ...central, new Uint8Array(end.buffer)], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
+}
+function xlsxBlobOf(sheetName, rows, lang) {
+  const x = s => String(s).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]).replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/g, "");
+  const col = i => { let s = ""; for (i++; i > 0; i = Math.floor((i - 1) / 26)) s = String.fromCharCode(65 + ((i - 1) % 26)) + s; return s; };
+  const numeric = v => /^-?\d+(\.\d+)?$/.test(v) && !(v.replace("-", "").length > 1 && /^-?0\d/.test(v)) && v.replace(/[-.]/g, "").length <= 15;
+  const body = rows.map((r, ri) => `<row r="${ri + 1}">` + r.map((v, ci) => {
+    const ref = col(ci) + (ri + 1), s = ri === 0 ? ' s="1"' : "", val = String(v ?? "");
+    if (!val) return "";
+    return numeric(val) && ri > 0 ? `<c r="${ref}"><v>${val}</v></c>` : `<c r="${ref}" t="inlineStr"${s}><is><t xml:space="preserve">${x(val)}</t></is></c>`;
+  }).join("") + "</row>").join("");
+  const ns = "http://schemas.openxmlformats.org/spreadsheetml/2006/main", rel = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
+  const name = x(sheetName.replace(/[:\\/?*\[\]]/g, " ").trim().slice(0, 31) || "Sheet1");
+  return xlsxZip([
+    ["[Content_Types].xml", `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/></Types>`],
+    ["_rels/.rels", `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="${rel}/officeDocument" Target="xl/workbook.xml"/></Relationships>`],
+    ["xl/workbook.xml", `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><workbook xmlns="${ns}" xmlns:r="${rel}"><sheets><sheet name="${name}" sheetId="1" r:id="rId1"/></sheets></workbook>`],
+    ["xl/_rels/workbook.xml.rels", `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="${rel}/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="${rel}/styles" Target="styles.xml"/></Relationships>`],
+    ["xl/styles.xml", `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><styleSheet xmlns="${ns}"><fonts count="2"><font><sz val="11"/><name val="Calibri"/></font><font><b/><sz val="11"/><color rgb="FFFFFFFF"/><name val="Calibri"/></font></fonts><fills count="3"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill><fill><patternFill patternType="solid"><fgColor rgb="FF1E7145"/><bgColor indexed="64"/></patternFill></fill></fills><borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders><cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs><cellXfs count="2"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/><xf numFmtId="0" fontId="1" fillId="2" borderId="0" xfId="0" applyFont="1" applyFill="1"/></cellXfs></styleSheet>`],
+    ["xl/worksheets/sheet1.xml", `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet xmlns="${ns}"><sheetViews><sheetView workbookViewId="0"${lang === "ar" ? ' rightToLeft="1"' : ""}/></sheetViews><sheetData>${body}</sheetData></worksheet>`],
+  ]);
+}
+
+/** Saves a file to the user's downloads. */
+function downloadBlob(blob, name) {
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob); a.download = name;
+  document.body.append(a); a.click(); a.remove();
+}
+
+/** The id of the data file a field names ("الملف الرئيسي", a file's name or its Excel file), or null (see Project.fileIdByName). */
+export function fileIdByName(project, name) {
+  const key = x => normalize(x ?? "").replace(/\.xlsx$/, "");
+  const n = key(name);
+  if (!n) return null;
+  const ex = project.excel || {};
+  if ([ "الملف الرئيسي", "Main file", ex.fileName, ex.sheet].some(x => x && key(x) === n)) return "";
+  return (project.files || []).find(f => [f.name, f.link?.fileName, f.link?.sheet].some(x => x && key(x) === n))?.id ?? null;
+}
+
 const esc = s => String(s ?? "").replace(/[&<>"]/g, ch => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[ch]);
 
 /** Opens a printable report in a new tab (the browser's print dialog can save it as PDF). */
@@ -598,8 +661,95 @@ export function runScreen(root, project, screen, store, opts) {
   };
   // Tables filtered by a field (its value or the column it names) follow it as it changes.
   const redrawFilteredBy = c => {
-    if (screen.components.some(o => o.type === "TABLE" && [prop(o, "filterField"), prop(o, "filterColumnField")].some(n => n && normalize(n) === normalize(c.name)))) tables.forEach(draw => draw());
+    if (screen.components.some(o => o.type === "TABLE" && [prop(o, "filterField"), prop(o, "filterColumnField"), prop(o, "tableFileField")].some(n => n && normalize(n) === normalize(c.name)))) tables.forEach(draw => draw());
   };
+  // ---- Tables from a file: which file, filter, sort and shown columns ----
+  const tableSorts = {}; // table id -> { column (in the file), descending }
+  const tableColumns = {}; // table id -> column names the user chose to show
+  const loadingFiles = new Set();
+  const tableFileOf = c => {
+    const field = byName(prop(c, "tableFileField"));
+    if (field) { const id = fileIdByName(project, toExcel(field)); if (id != null) return id; }
+    const chosen = prop(c, "tableFile");
+    if (chosen === "@main") return "";
+    return chosen && (project.files || []).some(f => f.id === chosen) ? chosen : fileId;
+  };
+  /** Rows of a file, read in the background the first time (tables redraw when they arrive). */
+  const rowsFor = id => {
+    if (id === fileId) return state.sheetRows || (store ? [store.headers] : null);
+    if (otherRows[id]) return otherRows[id];
+    const s = storeOf(id);
+    if (s && !loadingFiles.has(id)) {
+      loadingFiles.add(id);
+      s.rows().then(rows => { otherRows[id] = rows; tables.forEach(draw => draw()); }).catch(e => toast(opts.errorText(e))).finally(() => loadingFiles.delete(id));
+    }
+    return s ? [s.headers || []] : null;
+  };
+  /** What a sheet table shows (see TableView on Android): matching rows, sorted, in its shown columns. */
+  const tableView = c => {
+    const file = tableFileOf(c);
+    const rows = rowsFor(file);
+    if (!rows) return null;
+    const head = rows[0] || [];
+    const col = name => { if (!name) return null; const i = head.findIndex(x => normalize(x) === normalize(name)); return i < 0 ? null : i; };
+    // Advanced search: the column is the one chosen in a list (none or "all" = every column).
+    const columnField = byName(prop(c, "filterColumnField"));
+    const column = columnField ? col(toExcel(columnField)) : col(prop(c, "filterColumn"));
+    const source = byName(prop(c, "filterField"));
+    const wanted = source ? toExcel(source) : prop(c, "filterValue");
+    let numbers = rowsMatching(rows, column, wanted, prop(c, "filterMatch") === "contains", !!columnField);
+    const sort = tableSorts[c.id];
+    if (sort && sort.column >= 0) numbers = sortRows(rows, numbers, sort.column, sort.descending);
+    const chosen = tableColumns[c.id] || prop(c, "shownColumns").split(/[,،]/).map(x => x.trim()).filter(Boolean);
+    let columns = head.map((_, i) => i).filter(i => !chosen.length || chosen.some(n => normalize(n) === normalize(head[i])));
+    if (!columns.length) columns = head.map((_, i) => i);
+    const line = n => columns.map(i => (rows[n - 1] || [])[i] ?? "");
+    return { fileId: file, rows, columns, numbers, head, header: () => columns.map(i => head[i] ?? ""), line, shownRows: () => [columns.map(i => head[i] ?? ""), ...numbers.map(line)] };
+  };
+  /** The table that export and "show / hide columns" buttons act on. */
+  const mainTable = () => screen.components.find(o => o.type === "TABLE" && prop(o, "dataSource") === "sheet" && bool(o, "visible") && isShown(o));
+  function chooseColumns(table) {
+    const view = tableView(table);
+    if (!view) return;
+    const picked = new Set(view.columns.map(i => normalize(view.head[i])));
+    const close = () => overlay.remove();
+    const list = h("div", { maxHeight: "55vh", overflow: "auto" }, {}, ...view.head.filter(x => String(x).trim()).map(name => {
+      const box = h("input", { width: "18px", height: "18px" }, { type: "checkbox", onchange: e => { e.target.checked ? picked.add(normalize(name)) : picked.delete(normalize(name)); } });
+      box.checked = picked.has(normalize(name));
+      return h("label", { display: "flex", alignItems: "center", gap: "10px", padding: "8px 2px", cursor: "pointer", borderBottom: "1px solid #ffffff14" }, {}, box, String(name));
+    }));
+    const overlay = h("div", { position: "fixed", inset: "0", background: "#0008", display: "flex", alignItems: "center", justifyContent: "center", zIndex: "50" },
+      { dir: lang === "en" ? "ltr" : "rtl", onclick: e => { if (e.target === overlay) close(); } },
+      h("div", { background: "#172C24", color: "#fff", borderRadius: "14px", padding: "16px", width: "min(92vw, 380px)" }, {},
+        h("div", { fontWeight: "bold", marginBottom: "8px" }, {}, t("الأعمدة الظاهرة", "Columns shown")),
+        list,
+        h("div", { display: "flex", gap: "16px", justifyContent: "flex-end", marginTop: "10px" }, {},
+          h("button", { background: "none", border: "0", color: "#9FB5AA", fontSize: "15px", cursor: "pointer" }, { onclick: close }, t("إلغاء", "Cancel")),
+          h("button", { background: "none", border: "0", color: "#20B879", fontSize: "15px", cursor: "pointer", fontWeight: "bold" }, { onclick: () => {
+            const names = view.head.filter(x => picked.has(normalize(x)));
+            if (!names.length) return toast(t("اختر عمودًا واحدًا على الأقل.", "Choose at least one column."));
+            tableColumns[table.id] = names; close(); tables.forEach(draw => draw());
+          } }, t("تم", "Done")))));
+    document.body.append(overlay);
+  }
+  /** The table's shown rows (headers first), reading its file when needed; null with a message when there is none. */
+  async function shownTableRows() {
+    const table = mainTable();
+    if (!table) return null;
+    const file = tableFileOf(table);
+    if (file !== fileId && !otherRows[file]) { const s = storeOf(file); if (s) otherRows[file] = await s.rows(); }
+    if (file === fileId && !state.sheetRows && store) state.sheetRows = await store.rows();
+    return tableView(table)?.shownRows() || null;
+  }
+  async function exportTable() {
+    if (!mainTable()) return toast(t("أضف جدولًا مصدره ملف Excel في هذه الشاشة.", "Add a table showing an Excel file on this screen."));
+    try {
+      const rows = await shownTableRows();
+      if (!rows || rows.length < 2) return toast(t("لا توجد سجلات لعرضها.", "There are no records to show."));
+      downloadBlob(xlsxBlobOf(project.name || "data", rows, lang), (project.name || "data").replace(/[\\/:*?"<>|]+/g, "_") + ".xlsx");
+    } catch (e) { toast(opts.errorText(e)); }
+  }
+
   let filling = false;
   const sameForm = (a, b) => a && b && JSON.stringify(a) === JSON.stringify(b);
   const setValue = (c, v) => {
@@ -732,6 +882,11 @@ export function runScreen(root, project, screen, store, opts) {
     if (action === "back") return opts.back ? opts.back() : null;
     if (action === "pdfRecord") return recordReport();
     if (action === "pdfTable") return tableReport();
+    if (action === "excelTable") return exportTable();
+    if (action === "chooseColumns") {
+      const table = mainTable();
+      return table ? chooseColumns(table) : toast(t("أضف جدولًا مصدره ملف Excel في هذه الشاشة.", "Add a table showing an Excel file on this screen."));
+    }
     if (!store) return toast(t("هذا التطبيق غير مرتبط ببيانات.", "This app has no data source."));
     const writes = ["addRow", "upsertRow", "updateRow", "deleteRow"].includes(action);
     if (writes && opts.canEdit === false) return noAccess();
@@ -863,11 +1018,12 @@ export function runScreen(root, project, screen, store, opts) {
   }
 
   async function tableReport() {
-    if (!store) return toast(t("لا يوجد جدول بيانات مرتبط.", "No data table is linked."));
+    if (!store && !mainTable()) return toast(t("لا يوجد جدول بيانات مرتبط.", "No data table is linked."));
     const w = reportWindow(lang);
     if (!w) return toast(t("اسمح بالنوافذ المنبثقة لهذا الموقع لعرض التقرير.", "Allow pop-ups for this site to see the report."));
     try {
-      const [head, ...data] = await store.rows();
+      // What the screen's table shows (search, sort, columns), or every record.
+      const [head, ...data] = (await shownTableRows()) || await store.rows();
       const filled = data.filter(r => r.some(v => String(v).trim()));
       const cell = v => (isPhoto(v) ? t("صورة", "Photo") : esc(v));
       const body = `<p>${t("عدد السجلات: ", "Records: ")}${filled.length}</p><table><tr><th>#</th>${head.map(x => `<th>${esc(x)}</th>`).join("")}</tr>` +
@@ -959,15 +1115,27 @@ export function runScreen(root, project, screen, store, opts) {
         };
         // Suggestions from the sheet while typing; picking one shows that record.
         let menu = null;
-        const col = binds.find(([b]) => b === c)?.[1];
-        const mode = autocompleteMode(c);
+        // A key other fields look up in another file (like KKS on a maintenance screen) suggests from that file.
+        const looker = c.name && screen.components.find(o => prop(o, "lookupColumn") && normalize(prop(o, "lookupField")) === normalize(c.name));
+        const sourceFile = looker && prop(looker, "lookupFile") !== fileId ? prop(looker, "lookupFile") : null;
+        const ownCol = binds.find(([b]) => b === c)?.[1];
+        const mode = sourceFile != null && autocompleteMode(c) !== "off" ? "field" : autocompleteMode(c);
         const suggest = async () => {
           menu?.remove(); menu = null;
-          if (mode === "off" || col == null || !store) return;
           const typed = values[c.id] || "";
-          if (typed.trim().length < Math.max(1, Math.trunc(num(c, "suggestAfter")))) return;
-          if (!state.sheetRows) { try { state.sheetRows = await store.rows(); } catch (e) { return; } }
-          const rows = state.sheetRows;
+          if (mode === "off" || typed.trim().length < Math.max(1, Math.trunc(num(c, "suggestAfter")))) return;
+          let rows, col;
+          if (sourceFile != null) {
+            if (!otherRows[sourceFile]) { const s = storeOf(sourceFile); if (!s) return; try { otherRows[sourceFile] = await s.rows(); } catch (e) { return; } }
+            rows = otherRows[sourceFile];
+            const name = prop(c, "optionsColumn") || prop(c, "column") || (ownCol != null ? headers[ownCol] : "");
+            col = (rows[0] || []).findIndex(x => normalize(x) === normalize(name));
+            if (col < 0) return;
+          } else {
+            if (ownCol == null || !store) return;
+            if (!state.sheetRows) { try { state.sheetRows = await store.rows(); } catch (e) { return; } }
+            rows = state.sheetRows; col = ownCol;
+          }
           let list = suggestions(rows, col, typed);
           // Nothing to offer once the field already holds the value.
           if (list.some(([, v]) => normalize(v) === normalize(typed)) && (mode === "field" || list.length === 1)) {
@@ -1133,38 +1301,33 @@ export function runScreen(root, project, screen, store, opts) {
       }
       case "TABLE": {
         const el = h("div", { ...chrome(c), width: "100%", height: "100%", overflow: "auto" });
-        const fromSheet = prop(c, "dataSource") === "sheet" && store;
-        const sort = { column: -1, descending: false }; // tapping a header sorts by it, again reverses
+        const fromSheet = prop(c, "dataSource") === "sheet";
         const draw = () => {
           let grid;
-          let numbers = null; // Excel row number of each grid line when filtered
+          let numbers = null; // Excel row number of each grid line
+          let view = null;
           if (fromSheet) {
-            const rows = state.sheetRows || [store.headers];
-            // Advanced search: the column is the one chosen in a list (none or "all" = every column).
-            const columnField = byName(prop(c, "filterColumnField"));
-            const colName = columnField ? toExcel(columnField) : prop(c, "filterColumn");
-            const fcol = colName ? headers.findIndex(x => normalize(x) === normalize(colName)) : -1;
-            const source = byName(prop(c, "filterField"));
-            const wanted = source ? toExcel(source) : prop(c, "filterValue");
-            numbers = rowsMatching(rows, fcol >= 0 ? fcol : null, wanted, prop(c, "filterMatch") === "contains", !!columnField);
-            if (sort.column >= 0) numbers = sortRows(rows, numbers, sort.column, sort.descending);
-            numbers = [1, ...numbers].slice(0, 501);
-            grid = numbers.map(n => rows[n - 1]);
+            view = tableView(c);
+            if (!view) { el.replaceChildren(); return; }
+            numbers = [1, ...view.numbers].slice(0, 501);
+            grid = [view.header(), ...numbers.slice(1).map(view.line)];
           } else {
             const cols = prop(c, "columns").split(",").map(s => s.trim()).filter(Boolean);
             grid = [cols.length ? cols : [""], ...Array.from({ length: Math.max(1, Math.trunc(num(c, "rows"))) }, () => cols.map(() => ""))];
           }
-          const shownRow = numbers ? (numbers.indexOf(state.currentRow) > 0 ? numbers.indexOf(state.currentRow) + 1 : null) : state.currentRow;
-          el.replaceChildren(drawTable(c, style, grid, fromSheet ? shownRow : null, fromSheet ? line => {
-            const number = numbers ? numbers[line] : line + 1;
+          const own = view && view.fileId === fileId; // only rows of this screen's own file open in the form
+          const shownRow = own ? (numbers.indexOf(state.currentRow) > 0 ? numbers.indexOf(state.currentRow) + 1 : null) : null;
+          const sort = tableSorts[c.id] || { column: -1, descending: false };
+          el.replaceChildren(drawTable(c, style, grid, shownRow, own ? line => {
+            const number = numbers[line];
             const row = state.sheetRows?.[number - 1];
             if (!row || number < 2) return;
             fill(row);
             state.currentRow = number; state.lastCriteria = null; state.filledSnapshot = formValues();
             draw();
-          } : null, fromSheet ? { ...sort, onSort: k => {
-            sort.descending = sort.column === k ? !sort.descending : false;
-            sort.column = k;
+          } : null, view ? { column: view.columns.indexOf(sort.column), descending: sort.descending, onSort: k => {
+            const orig = view.columns[k];
+            tableSorts[c.id] = { column: orig, descending: sort.column === orig ? !sort.descending : false };
             draw();
           } } : null));
         };
