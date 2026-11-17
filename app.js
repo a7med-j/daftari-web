@@ -83,8 +83,9 @@ const chunkId = i => "c" + String(i).padStart(5, "0");
 const chunkIndex = id => (/^c\d+$/.test(id) ? Number(id.slice(1)) : null);
 const readRows = raw => (Array.isArray(raw) ? raw : []).map(m => ({ id: String(m?.id ?? ""), c: (m?.c || []).map(v => String(v ?? "")) }));
 
-function cloudStore(appId, headers) {
-  const col = collection(db, "apps", appId, "chunks");
+function cloudStore(appId, headers, fileId = "") {
+  // Extra files of the project keep their records under tables/{fileId}.
+  const col = fileId ? collection(db, "apps", appId, "tables", fileId, "chunks") : collection(db, "apps", appId, "chunks");
   let snapshot = []; // { id, chunk, c } in table order; index 0 is row 2
   const photoCache = new Map();
   return {
@@ -265,7 +266,9 @@ async function appView(user, appId) {
       // The owner and members the owner made editors may change records; other members only look.
       const canEdit = data.ownerUid === user.uid || (await getDoc(doc(db, "apps", appId, "members", user.uid))).data()?.role === "editor";
       const requestAccess = () => setDoc(doc(db, "apps", appId, "requests", user.uid), { email: user.email || "", at: Date.now() });
+      const storeFor = id => { const f = (project.files || []).find(x => x.id === id); return f ? cloudStore(appId, f.link.headers || [], id) : null; };
       const app = runApp(stage, project, cloudStore(appId, data.headers || []), {
+        storeFor,
         lang, t, toast, confirm: confirmBox, errorText, canEdit, requestAccess,
         onScreen: screen => { wrap.style.background = cssBackground(screen); },
       });

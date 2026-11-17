@@ -56,6 +56,30 @@ export function listOptions(items, rows, column, parentColumn, parentValue) {
 }
 
 /** The next serial number in a column (see FormLogic.nextNumber). */
+/** Fields whose value is worked out (a formula, or filled from a file). */
+const isCalculated = c => !!prop(c, "formula").trim() || !!(prop(c, "lookupField") && prop(c, "lookupColumn"));
+
+/** Fields filled from a file by another field's value, like FormLogic.lookups (VLOOKUP). */
+export function lookups(screen, valueOf, rowsOf) {
+  const out = {};
+  for (const c of screen.components) {
+    const keyName = prop(c, "lookupField"), column = prop(c, "lookupColumn");
+    if (!keyName || !column) continue;
+    const key = screen.components.find(o => normalize(o.name) === normalize(keyName));
+    if (!key) continue;
+    const value = normalize(valueOf(key));
+    if (!value) { out[c.id] = ""; continue; }
+    const rows = rowsOf(prop(c, "lookupFile"));
+    if (!rows) continue;
+    const index = name => { if (!name) return null; const i = (rows[0] || []).findIndex(x => normalize(x) === normalize(name)); return i < 0 ? null : i; };
+    const keyCol = index(prop(key, "optionsColumn")) ?? index(prop(key, "column")), valueCol = index(column);
+    if (keyCol == null || valueCol == null) continue;
+    const row = rows.slice(1).find(r => normalize(r[keyCol] ?? "") === value);
+    out[c.id] = row ? String(row[valueCol] ?? "") : "";
+  }
+  return out;
+}
+
 /** Data rows (Excel numbers) whose column equals one of the comma-separated values (all rows without a column). */
 export function rowsWhere(rows, column, wanted) {
   const values = String(wanted || "").split(/[,،]/).map(normalize).filter(Boolean);
@@ -466,6 +490,12 @@ const justify = align => ({ center: "center", end: "flex-end" }[align] || "flex-
  */
 export function runScreen(root, project, screen, store, opts) {
   const { lang, t, toast } = opts;
+  // The file this screen saves to ("" = main); other files are only read (lookups, lists).
+  const fileId = (project.files || []).some(f => f.id === (screen.properties || {}).dataFile) ? screen.properties.dataFile : "";
+  const mainStore = store;
+  const storeOf = id => (id ? opts.storeFor?.(id) || null : mainStore);
+  if (fileId) store = storeOf(fileId);
+  const otherRows = {};
   const headers = store ? store.headers : [];
   const binds = bindings(screen, headers);
   // Typed values are shared by all screens of the app, so they survive moving between screens.
@@ -473,8 +503,9 @@ export function runScreen(root, project, screen, store, opts) {
   for (const c of screen.components) if (INPUT_TYPES.has(c.type) && !(c.id in values)) values[c.id] = startValue(c, lang);
   let computed = {};
   const formulaShown = {}; // component id -> function(text) for calculated fields
+  const rowsOf = id => (id === fileId ? state.sheetRows : otherRows[id]);
   const recompute = () => {
-    computed = computeFormulas(screen, c => (c.type === "LABEL" ? c.text : values[c.id] ?? ""));
+    computed = { ...computeFormulas(screen, c => (c.type === "LABEL" ? c.text : values[c.id] ?? "")), ...lookups(screen, c => values[c.id] ?? "", rowsOf) };
     for (const [id, show] of Object.entries(formulaShown)) show(computed[id] ?? "");
     refreshShownLater();
   };
@@ -504,12 +535,29 @@ export function runScreen(root, project, screen, store, opts) {
   const colOf = name => { const i = headers.findIndex(x => normalize(x) === normalize(name)); return i < 0 ? null : i; };
   const optionsFor = c => {
     const parent = byName(prop(c, "parentField"));
-    return listOptions(prop(c, "items"), state.sheetRows, prop(c, "optionsColumn") ? colOf(prop(c, "optionsColumn")) : null,
-      parent ? binds.find(([b]) => b === parent)?.[1] ?? null : null, parent ? toExcel(parent) : null);
+    const rows = rowsOf(prop(c, "optionsColumn") ? prop(c, "optionsFile") : fileId);
+    const header = rows?.[0] || headers;
+    const index = name => { if (!name) return null; const i = header.findIndex(x => normalize(x) === normalize(name)); return i < 0 ? null : i; };
+    return listOptions(prop(c, "items"), rows, index(prop(c, "optionsColumn")),
+      parent ? index(prop(parent, "optionsColumn")) ?? index(prop(parent, "column")) : null, parent ? toExcel(parent) : null);
   };
+  let filling = false;
   const sameForm = (a, b) => a && b && JSON.stringify(a) === JSON.stringify(b);
   const setValue = (c, v) => {
     values[c.id] = v; inputs[c.id]?.(v); recompute();
+    // The key of a "save or update" button: an existing row with this key is shown to be updated.
+    const keyCol = binds.find(([b]) => b === c)?.[1];
+    if (!filling && keyCol != null && state.sheetRows && String(v).trim() &&
+        screen.components.some(o => prop(o, "action") === "upsertRow" && normalize(prop(o, "searchField")) === normalize(c.name))) {
+      const found = searchAll(state.sheetRows, { [keyCol]: v })[0];
+      if (found) { fill(state.sheetRows[found - 1]); state.currentRow = found; state.lastCriteria = null; state.filledSnapshot = formValues(); }
+      else if (state.currentRow != null) {
+        filling = true;
+        for (const [o] of binds) if (o !== c) setValue(o, startValue(o, lang));
+        filling = false;
+        state.currentRow = null;
+      }
+    }
     if (screen.components.some(o => o.type === "TABLE" && normalize(prop(o, "filterField")) === normalize(c.name))) tables.forEach(draw => draw());
     // Lists that depend on this one show matching options and drop a choice that no longer fits.
     for (const child of screen.components) {
@@ -519,10 +567,12 @@ export function runScreen(root, project, screen, store, opts) {
     }
   };
   const fill = row => {
+    filling = true;
     for (const [c, col] of binds) {
       const cell = row[col] ?? "";
       setValue(c, c.type === "CHECKBOX" ? String(TRUTHY.has(normalize(cell))) : cell);
     }
+    filling = false;
   };
   const clearForm = () => {
     for (const c of screen.components) if (INPUT_TYPES.has(c.type)) setValue(c, startValue(c, lang));
@@ -535,7 +585,16 @@ export function runScreen(root, project, screen, store, opts) {
 
   async function reloadTables() {
     if (!store) return;
-    const listsFromSheet = screen.components.some(c => prop(c, "optionsColumn") || prop(c, "scan") === "record" || (c.type === "LABEL" && prop(c, "stat")));
+    // Other files read by this screen.
+    const reads = new Set(screen.components.flatMap(c => [
+      prop(c, "lookupField") ? prop(c, "lookupFile") : null, prop(c, "optionsColumn") ? prop(c, "optionsFile") : null,
+    ]).filter(id => id != null && id !== fileId));
+    for (const id of reads) {
+      const s = storeOf(id);
+      if (s) s.rows().then(rows => { otherRows[id] = rows; recompute(); Object.values(optionRefreshers).forEach(r => r()); }).catch(() => {});
+    }
+    const listsFromSheet = screen.components.some(c => prop(c, "optionsColumn") || prop(c, "scan") === "record" || (c.type === "LABEL" && prop(c, "stat"))
+      || prop(c, "action") === "upsertRow" || prop(c, "lookupField"));
     if (!tables.length && !listsFromSheet) { state.sheetRows = null; return; } // suggestions read the sheet again when needed
     try {
       state.sheetRows = await store.rows();
@@ -606,13 +665,26 @@ export function runScreen(root, project, screen, store, opts) {
     if (action === "pdfRecord") return recordReport();
     if (action === "pdfTable") return tableReport();
     if (!store) return toast(t("هذا التطبيق غير مرتبط ببيانات.", "This app has no data source."));
-    const writes = ["addRow", "updateRow", "deleteRow"].includes(action);
+    const writes = ["addRow", "upsertRow", "updateRow", "deleteRow"].includes(action);
     if (writes && opts.canEdit === false) return noAccess();
     if (!binds.length) return toast(t("لا يوجد حقل مرتبط بعمود.", "No field is linked to a column."));
     if (state.working) return;
     state.working = true;
     try {
-      if (action === "addRow") {
+      if (action === "upsertRow") {
+        const key = byName(button ? prop(button, "searchField") : "");
+        const keyCol = key && binds.find(([b]) => b === key)?.[1];
+        if (keyCol == null) return toast(t("اختر في خصائص الزر «البحث بواسطة» الحقل الذي يميّز كل صف (مثل KKS).", "Choose in the button's \"Search by\" the field that identifies each row (like KKS)."));
+        const keyValue = toExcel(key);
+        if (!String(keyValue).trim()) return toast(t("اختر قيمة الحقل المميّز أولًا.", "Fill in the identifying field first."));
+        const missing = missingRequired();
+        if (missing.length) return toast(t("املأ الحقول المطلوبة: ", "Fill in the required fields: ") + missing.join("، "));
+        const rows = await store.rows();
+        const found = searchAll(rows, { [keyCol]: keyValue })[0];
+        if (found) { await store.update(found, formValues()); toast(t(`تم تحديث سجل «${keyValue}» ✓`, `"${keyValue}" updated ✓`)); }
+        else { const row = await store.append(formValues()); toast(t(`تمت إضافة «${keyValue}» في الصف ${row} ✓`, `"${keyValue}" added in row ${row} ✓`)); }
+        clearForm();
+      } else if (action === "addRow") {
         const missing = missingRequired();
         if (missing.length) return toast(t("املأ الحقول المطلوبة: ", "Fill in the required fields: ") + missing.join("، "));
         if (Object.values(formValues()).every(v => !String(v).trim())) return toast(t("الحقول فارغة.", "The fields are empty."));
@@ -779,7 +851,7 @@ export function runScreen(root, project, screen, store, opts) {
         const max = Math.trunc(num(c, "maxLines"));
         const el = frame({ justifyContent: justify(prop(c, "textAlign")) });
         const text = h("div", { ...style, width: "100%", whiteSpace: "pre-wrap", ...(max > 0 ? { display: "-webkit-box", WebkitLineClamp: String(max), WebkitBoxOrient: "vertical", overflow: "hidden" } : {}) }, { dir: "auto" }, c.text);
-        if (prop(c, "formula").trim()) formulaShown[c.id] = v => { text.textContent = v; };
+        if (isCalculated(c)) formulaShown[c.id] = v => { text.textContent = v; };
         if (prop(c, "stat")) {
           const colOfName = name => { const i = headers.findIndex(x => normalize(x) === normalize(name)); return i < 0 ? null : i; };
           const update = () => {
@@ -806,7 +878,7 @@ export function runScreen(root, project, screen, store, opts) {
         const attrs = {
           placeholder: bool(c, "autoNumber") ? t("رقم تلقائي عند الحفظ", "Numbered on save") : prop(c, "hint") + (required ? " *" : ""),
           maxlength: num(c, "maxLength") > 0 ? Math.trunc(num(c, "maxLength")) : null,
-          readonly: bool(c, "readOnly") || bool(c, "autoNumber") || !!prop(c, "formula").trim(), disabled: !enabled,
+          readonly: bool(c, "readOnly") || bool(c, "autoNumber") || isCalculated(c), disabled: !enabled,
           type: { password: "password", email: "email", phone: "tel" }[type] || "text",
           inputmode: { number: "numeric", decimal: "decimal", phone: "tel", email: "email" }[type] || null,
           oninput: e => { values[c.id] = e.target.value; recompute(); suggest(); },
@@ -844,7 +916,7 @@ export function runScreen(root, project, screen, store, opts) {
           attrs);
         input.value = values[c.id];
         inputs[c.id] = v => { input.value = v; };
-        if (prop(c, "formula").trim()) formulaShown[c.id] = v => { input.value = v; };
+        if (isCalculated(c)) formulaShown[c.id] = v => { input.value = v; };
         const el = frame({ alignItems: multiline ? "flex-start" : "center" });
         el.style.setProperty("--hint", cssColor(prop(c, "hintColor")));
         input.classList.add("hinted");

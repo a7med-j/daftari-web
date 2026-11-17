@@ -131,9 +131,10 @@ export async function runStandalone(CONFIG, ICON) {
   };
 
   // ---- Personal: records and photos kept in this browser (IndexedDB) ----
-  function localStore() {
-    const headers = CONFIG.headers || [];
-    const dbName = "waraqa-" + CONFIG.id;
+  function localStore(fileId = "") {
+    const file = (project.files || []).find(f => f.id === fileId);
+    const headers = file ? file.link.headers || [] : CONFIG.headers || [];
+    const dbName = "waraqa-" + CONFIG.id + (fileId ? "-" + fileId : "");
     const opened = new Promise((resolve, reject) => {
       const req = indexedDB.open(dbName, 1);
       req.onupgradeneeded = () => { req.result.createObjectStore("table"); req.result.createObjectStore("photos"); };
@@ -174,8 +175,13 @@ export async function runStandalone(CONFIG, ICON) {
   if (CONFIG.mode !== "cloud") {
     if (navigator.storage?.persist) navigator.storage.persist().catch(() => {});
     const store = localStore();
+    const extra = {};
     setMenu([[t("تصدير البيانات إلى Excel", "Export data to Excel"), () => exportExcel(store)]]);
-    start(store);
+    runApp(stage, project, store, {
+      lang, t, toast, confirm: confirmBox, errorText,
+      storeFor: id => (project.files || []).some(f => f.id === id) ? (extra[id] ||= localStore(id)) : null,
+      onScreen: screen => { document.body.style.background = bg(screen); },
+    });
     return;
   }
 
@@ -198,8 +204,8 @@ export async function runStandalone(CONFIG, ICON) {
   const chunkIndex = id => (/^c\d+$/.test(id) ? Number(id.slice(1)) : null);
   const readRows = raw => (Array.isArray(raw) ? raw : []).map(m => ({ id: String(m?.id ?? ""), c: (m?.c || []).map(v => String(v ?? "")) }));
 
-  function cloudStore(appId, headers) {
-    const col = fb.collection(db, "apps", appId, "chunks");
+  function cloudStore(appId, headers, fileId = "") {
+    const col = fileId ? fb.collection(db, "apps", appId, "tables", fileId, "chunks") : fb.collection(db, "apps", appId, "chunks");
     let snapshot = [];
     const photoCache = new Map();
     async function change(number, transform) {
@@ -270,6 +276,7 @@ export async function runStandalone(CONFIG, ICON) {
       const data = snap.data();
       const latest = JSON.parse(data.json); // the owner's latest published design
       const store = cloudStore(CONFIG.appId, data.headers || []);
+      const storeFor = id => { const f = (latest.files || []).find(x => x.id === id); return f ? cloudStore(CONFIG.appId, f.link.headers || [], id) : null; };
       // The owner and members the owner made editors may change records; other members only look.
       const canEdit = data.ownerUid === user.uid ||
         (await fb.getDoc(fb.doc(db, "apps", CONFIG.appId, "members", user.uid))).data()?.role === "editor";
@@ -278,7 +285,7 @@ export async function runStandalone(CONFIG, ICON) {
         [t("تصدير البيانات إلى Excel", "Export data to Excel"), () => exportExcel(store)],
         [t("تسجيل الخروج", "Sign out"), () => fb.signOut(fb.auth)],
       ]);
-      runApp(stage, latest, store, { lang, t, toast, confirm: confirmBox, errorText, canEdit, requestAccess, onScreen: screen => { document.body.style.background = bg(screen); } });
+      runApp(stage, latest, store, { lang, t, toast, confirm: confirmBox, errorText, canEdit, requestAccess, storeFor, onScreen: screen => { document.body.style.background = bg(screen); } });
     } catch (e) {
       stage.replaceChildren(node("div", { class: "center" }, node("p", {}, errorText(e)),
         node("button", { class: "lnk", onclick: () => fb.signOut(fb.auth) }, t("تسجيل الخروج", "Sign out"))));
