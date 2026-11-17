@@ -47,12 +47,24 @@ const stage = document.getElementById("stage");
 const say = (ar, en) => { stage.querySelector("p").textContent = navigator.language.startsWith("en") ? en : ar; };
 const id = new URLSearchParams(location.search).get("id");
 const value = v => v == null ? null : "stringValue" in v ? v.stringValue : "arrayValue" in v ? (v.arrayValue.values || []).map(value) : null;
+// Pages kept in this browser, so the app also opens without a connection.
+if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js").catch(() => {});
 try {
   if (!id || !/^[\w-]{1,80}$/.test(id)) throw new Error("bad id");
   const url = `https://firestore.googleapis.com/v1/projects/${firebaseConfig.projectId}/databases/(default)/documents/webApps/${id}?key=${firebaseConfig.apiKey}`;
-  const res = await fetch(url);
-  if (!res.ok) throw new Error(String(res.status));
-  const f = (await res.json()).fields || {};
+  // The app's design, kept in this browser for opening it offline.
+  const keptKey = "waraqa-webapp:" + id;
+  let f;
+  try {
+    const res = await fetch(url);
+    if (!res.ok) throw new Error(String(res.status));
+    f = (await res.json()).fields || {};
+    try { localStorage.setItem(keptKey, JSON.stringify(f)); } catch (e) {}
+  } catch (e) {
+    const kept = localStorage.getItem(keptKey);
+    if (!kept) throw e;
+    f = JSON.parse(kept);
+  }
   const config = {
     name: value(f.name) || "", mode: value(f.mode) || "personal", projectJson: value(f.json) || "{}",
     appId: value(f.appId) || "", shareCode: value(f.shareCode) || "", id, headers: value(f.headers) || [],

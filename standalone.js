@@ -1,7 +1,7 @@
 // The standalone runner of an exported web app (one app, no Waraqa screens around it): offline with
 // its data in this browser, or signed in to the team's cloud table. Used by app.html (hosted link)
 // and inlined into exported .html files by the Waraqa app (WebExport.kt), so keep it self-contained.
-import { runApp } from "./render.js";
+import { runApp, offlineTable } from "./render.js";
 
 // ---- The exported app's shell: runs the one app above, offline in this browser or on the team's cloud table ----
 export async function runStandalone(CONFIG, ICON) {
@@ -206,7 +206,9 @@ export async function runStandalone(CONFIG, ICON) {
     fb = { ...authMod, ...fsMod };
     const app = appMod.initializeApp(FIREBASE);
     fb.auth = authMod.getAuth(app);
-    fb.db = fsMod.getFirestore(app);
+    // Data read once stays in this browser, so the app opens and works without a connection.
+    try { fb.db = fsMod.initializeFirestore(app, { localCache: fsMod.persistentLocalCache({ tabManager: fsMod.persistentMultipleTabManager() }) }); }
+    catch (e) { fb.db = fsMod.getFirestore(app); }
   } catch (e) {
     stage.replaceChildren(node("div", { class: "center" }, node("p", {}, t("هذا التطبيق يحتاج اتصالًا بالإنترنت.", "This app needs an internet connection."))));
     return;
@@ -221,45 +223,11 @@ export async function runStandalone(CONFIG, ICON) {
 
   function cloudStore(appId, headers, fileId = "") {
     const col = fileId ? fb.collection(db, "apps", appId, "tables", fileId, "chunks") : fb.collection(db, "apps", appId, "chunks");
-    let snapshot = [];
     const photoCache = new Map();
-    async function change(number, transform) {
-      const target = snapshot[number - 2];
-      if (!target) throw fail("app-gone");
-      const ref = fb.doc(col, target.chunk);
-      await fb.runTransaction(db, async tx => {
-        const rows = readRows((await tx.get(ref)).data()?.rows), edited = [];
-        for (const r of rows) { if (r.id !== target.id) edited.push(r); else { const c = transform(r.c); if (c) edited.push({ ...r, c }); } }
-        tx.set(ref, { rows: edited, updatedAt: fb.serverTimestamp() });
-      });
-    }
-    return {
-      headers,
-      async rows() {
-        const docs = (await fb.getDocs(col)).docs.sort((a, b) => (a.id < b.id ? -1 : 1));
-        snapshot = docs.flatMap(d => readRows(d.data().rows).map(r => ({ ...r, chunk: d.id })));
-        return [headers, ...snapshot.map(r => r.c)];
-      },
-      authors() { return snapshot.map(r => r.by || ""); },
-      authorNames() { return snapshot.map(r => r.byName || ""); },
-      async append(values) {
-        const width = Math.max(headers.length, ...Object.keys(values).map(k => Number(k) + 1));
-        const cells = Array.from({ length: width }, (_, i) => values[i] ?? "");
-        const ids = (await fb.getDocs(col)).docs.map(d => chunkIndex(d.id)).filter(i => i != null);
-        const last = ids.length ? Math.max(...ids) : null;
-        const row = { ...authorOf(fb.auth.currentUser), id: crypto.randomUUID(), c: cells };
-        await fb.runTransaction(db, async tx => {
-          const lastRows = last == null ? [] : readRows((await tx.get(fb.doc(col, chunkId(last)))).data()?.rows);
-          const target = last == null ? 0 : lastRows.length >= CHUNK ? last + 1 : last;
-          const existing = target === last ? lastRows : readRows((await tx.get(fb.doc(col, chunkId(target)))).data()?.rows);
-          tx.set(fb.doc(col, chunkId(target)), { rows: [...existing, row], updatedAt: fb.serverTimestamp() });
-        });
-        return (await this.rows()).length;
-      },
-      async update(number, values) {
-        await change(number, cells => { const out = [...cells]; for (const [k, v] of Object.entries(values)) { while (out.length <= Number(k)) out.push(""); out[Number(k)] = v; } return out; });
-      },
-      async delete(number) { await change(number, () => null); },
+    // Works offline too: changes wait in this browser and go up when the connection is back.
+    const table = offlineTable({ db, doc: fb.doc, getDocs: fb.getDocs, getDocsFromServer: fb.getDocsFromServer, runTransaction: fb.runTransaction, serverTimestamp: fb.serverTimestamp },
+      col, headers, () => authorOf(fb.auth.currentUser));
+    return Object.assign(table, {
       async savePhoto(name, jpeg) {
         await fb.setDoc(fb.doc(db, "apps", appId, "photos", name), { data: fb.Bytes.fromUint8Array(jpeg), createdAt: fb.serverTimestamp() });
         photoCache.set(name, URL.createObjectURL(new Blob([jpeg], { type: "image/jpeg" })));
@@ -272,7 +240,7 @@ export async function runStandalone(CONFIG, ICON) {
         })());
         return await photoCache.get(name);
       },
-    };
+    });
   }
 
   async function join(user) {

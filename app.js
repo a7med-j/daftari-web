@@ -7,14 +7,19 @@ import {
   sendPasswordResetEmail, signOut, updateProfile,
 } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-auth.js";
 import {
-  getFirestore, doc, getDoc, setDoc, deleteDoc, collection, getDocs, query, where, runTransaction, serverTimestamp, Bytes,
+  initializeFirestore, persistentLocalCache, persistentMultipleTabManager, doc, getDoc, setDoc, deleteDoc, collection, getDocs, getDocsFromServer,
+  query, where, runTransaction, serverTimestamp, Bytes,
 } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore.js";
 import { firebaseConfig } from "./config.js";
-import { runApp, useAppManifest } from "./render.js";
+import { runApp, useAppManifest, offlineTable } from "./render.js";
+
+// Pages kept in this browser, so the site also opens without a connection.
+if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js").catch(() => {});
 
 const fb = initializeApp(firebaseConfig);
 const auth = getAuth(fb);
-const db = getFirestore(fb);
+// Data read once stays in this browser, so apps open and work without a connection.
+const db = initializeFirestore(fb, { localCache: persistentLocalCache({ tabManager: persistentMultipleTabManager() }) });
 
 // ---- Language ----
 let lang = localStorage.getItem("lang") || (navigator.language || "ar").slice(0, 2);
@@ -88,42 +93,9 @@ const authorOf = user => ({ by: user?.uid || "", byName: (user?.displayName || "
 function cloudStore(appId, headers, fileId = "") {
   // Extra files of the project keep their records under tables/{fileId}.
   const col = fileId ? collection(db, "apps", appId, "tables", fileId, "chunks") : collection(db, "apps", appId, "chunks");
-  let snapshot = []; // { id, chunk, c } in table order; index 0 is row 2
   const photoCache = new Map();
-  return {
-    headers,
-    async rows() {
-      const docs = (await getDocs(col)).docs.sort((a, b) => (a.id < b.id ? -1 : 1));
-      snapshot = docs.flatMap(d => readRows(d.data().rows).map(r => ({ ...r, chunk: d.id })));
-      return [headers, ...snapshot.map(r => r.c)];
-    },
-    /** Who added each record of the last read (uid; "" for older records), index 0 = row 2. */
-    authors() { return snapshot.map(r => r.by || ""); },
-    authorNames() { return snapshot.map(r => r.byName || ""); },
-    async append(values) {
-      const width = Math.max(headers.length, ...Object.keys(values).map(k => Number(k) + 1));
-      const cells = Array.from({ length: width }, (_, i) => values[i] ?? "");
-      const ids = (await getDocs(col)).docs.map(d => chunkIndex(d.id)).filter(i => i != null);
-      const last = ids.length ? Math.max(...ids) : null;
-      const row = { ...authorOf(auth.currentUser), id: crypto.randomUUID(), c: cells };
-      await runTransaction(db, async tx => {
-        const lastRows = last == null ? [] : readRows((await tx.get(doc(col, chunkId(last)))).data()?.rows);
-        const target = last == null ? 0 : lastRows.length >= CHUNK ? last + 1 : last;
-        const existing = target === last ? lastRows : readRows((await tx.get(doc(col, chunkId(target)))).data()?.rows);
-        tx.set(doc(col, chunkId(target)), { rows: [...existing, row], updatedAt: serverTimestamp() });
-      });
-      return (await this.rows()).length;
-    },
-    async update(number, values) {
-      await change(number, cells => {
-        const out = [...cells];
-        for (const [k, v] of Object.entries(values)) { while (out.length <= Number(k)) out.push(""); out[Number(k)] = v; }
-        return out;
-      });
-    },
-    async delete(number) {
-      await change(number, () => null);
-    },
+  const table = offlineTable({ db, doc, getDocs, getDocsFromServer, runTransaction, serverTimestamp }, col, headers, () => authorOf(auth.currentUser));
+  return Object.assign(table, {
     // Photos: one compressed JPEG per document, shown from a small in-memory cache.
     async savePhoto(name, jpeg) {
       await setDoc(doc(db, "apps", appId, "photos", name), { data: Bytes.fromUint8Array(jpeg), createdAt: serverTimestamp() });
@@ -141,21 +113,7 @@ function cloudStore(appId, headers, fileId = "") {
       }
       return await photoCache.get(name);
     },
-  };
-  async function change(number, transform) {
-    const target = snapshot[number - 2];
-    if (!target) throw fail("app-gone");
-    const ref = doc(col, target.chunk);
-    await runTransaction(db, async tx => {
-      const rows = readRows((await tx.get(ref)).data()?.rows);
-      const edited = [];
-      for (const r of rows) {
-        if (r.id !== target.id) edited.push(r);
-        else { const c = transform(r.c); if (c) edited.push({ ...r, c }); }
-      }
-      tx.set(ref, { rows: edited, updatedAt: serverTimestamp() });
-    });
-  }
+  });
 }
 
 // ---- Sharing ----

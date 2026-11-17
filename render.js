@@ -421,6 +421,130 @@ export async function compressPhoto(file, maxSide = 1280, maxBytes = 700000) {
   return new Uint8Array(await blob.arrayBuffer());
 }
 
+// ---- Shared tables that keep working offline (same layout and rules as Android's CloudRowStore) ----
+
+/** Waiting changes applied to the stored records: new ones at the end, changes and removals in place (see OfflineOps). */
+export function applyPending(records, ops) {
+  const list = records.map(r => ({ ...r }));
+  for (const op of ops) {
+    if (op.kind === "add") { if (!list.some(r => r.id === op.id)) list.push({ ...(op.extra || {}), id: op.id, c: op.cells || [], pending: true }); }
+    else if (op.kind === "update") { const r = list.find(x => x.id === op.id); if (r) { r.c = withValues(r.c, op.values); r.pending = true; } }
+    else if (op.kind === "delete") { const i = list.findIndex(x => x.id === op.id); if (i >= 0) list.splice(i, 1); }
+  }
+  return list;
+}
+export const withValues = (cells, values) => {
+  const out = [...cells];
+  for (const [k, v] of Object.entries(values || {})) { const i = Number(k); while (out.length <= i) out.push(""); out[i] = v; }
+  return out;
+};
+
+/**
+ * A shared table's records (fs: the Firestore functions in use). Without a connection a change is
+ * kept in this browser, shown at once, and uploaded in order when the connection comes back.
+ */
+export function offlineTable(fs, col, headers, author) {
+  const CHUNK = 200;
+  const chunkId = i => "c" + String(i).padStart(5, "0");
+  const chunkIndex = id => (/^c\d+$/.test(id) ? Number(id.slice(1)) : null);
+  const readRows = raw => (Array.isArray(raw) ? raw : []).map(m => ({ ...(m || {}), id: String(m?.id ?? ""), c: (m?.c || []).map(v => String(v ?? "")) }));
+  const plain = r => { const { chunk, pending, ...rest } = r; return rest; };
+  const key = "waraqa-offline:" + col.path;
+  const queue = () => { try { return JSON.parse(localStorage.getItem(key) || "[]"); } catch (e) { return []; } };
+  const saveQueue = ops => { try { ops.length ? localStorage.setItem(key, JSON.stringify(ops)) : localStorage.removeItem(key); } catch (e) {} };
+  const isOffline = e => !navigator.onLine || ["unavailable", "deadline-exceeded", "failed-precondition"].includes(e?.code) || e?.offline;
+  let snapshot = [];
+  let lastOffline = false;
+  let flushing = null;
+
+  async function appendIn(row) {
+    const ids = (await fs.getDocsFromServer(col)).docs.map(d => chunkIndex(d.id)).filter(i => i != null);
+    const last = ids.length ? Math.max(...ids) : null;
+    await fs.runTransaction(fs.db, async tx => {
+      const lastRows = last == null ? [] : readRows((await tx.get(fs.doc(col, chunkId(last)))).data()?.rows);
+      const target = last == null ? 0 : lastRows.length >= CHUNK ? last + 1 : last;
+      const existing = target === last ? lastRows : readRows((await tx.get(fs.doc(col, chunkId(target)))).data()?.rows);
+      tx.set(fs.doc(col, chunkId(target)), { rows: [...existing, row], updatedAt: fs.serverTimestamp() });
+    });
+  }
+  async function rewrite(id, transform) {
+    const holder = (await fs.getDocsFromServer(col)).docs.find(d => readRows(d.data().rows).some(r => r.id === id));
+    if (!holder) return false;
+    await fs.runTransaction(fs.db, async tx => {
+      const rows = readRows((await tx.get(holder.ref)).data()?.rows), edited = [];
+      for (const r of rows) { if (r.id !== id) edited.push(r); else { const c = transform(r.c); if (c) edited.push({ ...r, c }); } }
+      tx.set(holder.ref, { rows: edited, updatedAt: fs.serverTimestamp() });
+    });
+    return true;
+  }
+  /** Uploads the waiting changes in order; stops at the first one that can't go up yet. */
+  function flush() {
+    flushing ||= (async () => {
+      try {
+        for (const op of queue()) {
+          if (op.kind === "add") {
+            const exists = (await fs.getDocsFromServer(col)).docs.some(d => readRows(d.data().rows).some(r => r.id === op.id));
+            if (!exists) await appendIn({ ...(op.extra || {}), id: op.id, c: op.cells });
+          } else await rewrite(op.id, cells => (op.kind === "delete" ? null : withValues(cells, op.values)));
+          saveQueue(queue().filter(o => JSON.stringify(o) !== JSON.stringify(op)));
+        }
+      } finally { flushing = null; }
+    })();
+    return flushing;
+  }
+  const keep = op => { saveQueue([...queue(), op]); lastOffline = true; };
+  if (typeof window !== "undefined") window.addEventListener("online", () => { if (queue().length) flush().catch(() => {}); });
+
+  return {
+    headers,
+    async rows() {
+      if (queue().length && navigator.onLine) await flush().catch(() => {});
+      // Offline, Firestore answers from the copy kept in this browser.
+      const docs = (await fs.getDocs(col)).docs.sort((a, b) => (a.id < b.id ? -1 : 1));
+      const stored = docs.flatMap(d => readRows(d.data().rows).map(r => ({ ...r, chunk: d.id })));
+      snapshot = applyPending(stored, queue());
+      return [headers, ...snapshot.map(r => r.c)];
+    },
+    authors() { return snapshot.map(r => r.by || ""); },
+    authorNames() { return snapshot.map(r => r.byName || ""); },
+    savedOffline() { return lastOffline; },
+    pendingCount() { return queue().length; },
+    async append(values) {
+      const width = Math.max(headers.length, ...Object.keys(values).map(k => Number(k) + 1));
+      const cells = Array.from({ length: width }, (_, i) => values[i] ?? "");
+      const extra = author(), id = crypto.randomUUID();
+      lastOffline = false;
+      try {
+        if (queue().length || !navigator.onLine) throw { offline: true }; // keep the order
+        await appendIn({ ...extra, id, c: cells });
+      } catch (e) {
+        if (!isOffline(e)) throw e;
+        keep({ kind: "add", id, cells, extra });
+      }
+      const offline = lastOffline;
+      const n = (await this.rows()).length;
+      lastOffline = offline;
+      return n;
+    },
+    async update(number, values) { await change(number, "update", Object.fromEntries(Object.entries(values).map(([k, v]) => [String(k), v]))); },
+    async delete(number) { await change(number, "delete", {}); },
+  };
+
+  async function change(number, kind, values) {
+    const target = snapshot[number - 2];
+    if (!target) throw Object.assign(new Error("app-gone"), { code: "not-found" });
+    lastOffline = false;
+    try {
+      if (target.pending || queue().length || !navigator.onLine) throw { offline: true };
+      await rewrite(target.id, cells => (kind === "delete" ? null : withValues(cells, values)));
+    } catch (e) {
+      if (!isOffline(e)) throw e;
+      keep({ kind, id: target.id, values });
+    }
+    snapshot = kind === "delete" ? snapshot.filter(r => r.id !== target.id) : snapshot.map(r => (r.id === target.id ? { ...r, c: withValues(r.c, values) } : r));
+  }
+}
+
 // ---- Excel file of table rows (a minimal .xlsx: inline strings, numbers as numbers) ----
 const xlsxCrcTable = Array.from({ length: 256 }, (_, n) => { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xEDB88320 ^ (c >>> 1) : c >>> 1; return c >>> 0; });
 const xlsxCrc32 = bytes => { let c = 0xFFFFFFFF; for (const b of bytes) c = xlsxCrcTable[(c ^ b) & 0xFF] ^ (c >>> 8); return (c ^ 0xFFFFFFFF) >>> 0; };
@@ -996,6 +1120,8 @@ export function runScreen(root, project, screen, store, opts) {
     .filter(([c]) => ["TEXT_FIELD", "PHOTO", "RADIO", "SIGNATURE", "LOCATION"].includes(c.type) && bool(c, "required") && !bool(c, "autoNumber")
       && !(values[c.id] || "").trim() && isShown(c))
     .map(([c, col]) => headers[col] || c.name);
+  /** A change's confirmation; changes kept in this browser while offline say they will upload later. */
+  const saved = message => toast(store?.savedOffline?.() ? message.replace(/ ✓$/, "") + t(" ⏳ بدون اتصال، سيُرفع تلقائيًا عند رجوع الإنترنت", " ⏳ offline, uploads automatically when back online") : message);
   /** A "no repeats" field whose value another record (not `except`) already has, as a message, or null. */
   const duplicateError = (rows, except) => {
     for (const [c, col] of binds) {
@@ -1121,8 +1247,8 @@ export function runScreen(root, project, screen, store, opts) {
         const found = searchAll(rows, { [keyCol]: keyValue })[0];
         const repeated = duplicateError(rows, found || null);
         if (repeated) return toast(repeated);
-        if (found) { await store.update(found, formValues()); toast(t(`تم تحديث سجل «${keyValue}» ✓`, `"${keyValue}" updated ✓`)); }
-        else { const row = await store.append(formValues()); toast(t(`تمت إضافة «${keyValue}» في الصف ${row} ✓`, `"${keyValue}" added in row ${row} ✓`)); }
+        if (found) { await store.update(found, formValues()); saved(t(`تم تحديث سجل «${keyValue}» ✓`, `"${keyValue}" updated ✓`)); }
+        else { const row = await store.append(formValues()); saved(t(`تمت إضافة «${keyValue}» في الصف ${row} ✓`, `"${keyValue}" added in row ${row} ✓`)); }
         clearForm();
       } else if (action === "addRow") {
         const missing = missingRequired();
@@ -1140,7 +1266,7 @@ export function runScreen(root, project, screen, store, opts) {
         }
         const row = await store.append(formValues());
         clearForm();
-        toast(t(`تمت إضافة الصف رقم ${row} ✓`, `Row ${row} added ✓`) + (assigned.length ? " — " + assigned.join("، ") : ""));
+        saved(t(`تمت إضافة الصف رقم ${row} ✓`, `Row ${row} added ✓`) + (assigned.length ? " — " + assigned.join("، ") : ""));
       } else if (action === "search") {
         const field = button ? prop(button, "searchField") : "";
         const mode = (button && prop(button, "matchMode")) || "exact";
@@ -1168,14 +1294,14 @@ export function runScreen(root, project, screen, store, opts) {
         if (repeated) return toast(repeated);
         await store.update(row, formValues());
         state.filledSnapshot = formValues();
-        toast(t(`تم حفظ التعديل على الصف ${row} ✓`, `Row ${row} updated ✓`));
+        saved(t(`تم حفظ التعديل على الصف ${row} ✓`, `Row ${row} updated ✓`));
       } else if (action === "deleteRow") {
         const row = state.currentRow;
         if (row == null) return toast(t("ابحث عن الصف أولًا ثم احذفه.", "Search for the row first, then delete it."));
         if (!(await opts.confirm(t(`حذف الصف ${row}؟ تصعد الصفوف التي بعده.`, `Delete row ${row}? The rows below move up.`)))) return;
         await store.delete(row);
         clearForm();
-        toast(t(`تم حذف الصف ${row}`, `Row ${row} deleted`));
+        saved(t(`تم حذف الصف ${row}`, `Row ${row} deleted`));
       }
       await reloadTables();
     } catch (e) {
