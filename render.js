@@ -525,15 +525,31 @@ export async function securityGate(ui) {
   });
 
   // 2. The lock: on opening, and when back after more than two minutes away.
-  const unlockOnce = () => new Promise(done => {
+  const unlockOnce = () => new Promise(async done => {
     const keyId = store.get("waraqa-key:" + uid), hash = store.get("waraqa-pw:" + uid);
     if (!keyId && !hash) return done(); // nothing known on this browser yet: opens (the check above sets it)
+    // The phone's own lock (fingerprint, face or PIN), when this browser can use it.
+    const deviceLock = !!window.PublicKeyCredential && !!(await PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable?.().catch(() => false));
     const pass = input(t("كلمة مرور الحساب", "Account password"));
     const msg = note("", "#FF8A80"), open = button(t("فتح", "Open"));
-    const bio = keyId ? button(t("فتح بالبصمة أو رمز الجوال", "Unlock with fingerprint or PIN")) : null;
+    const bio = deviceLock ? button(t("فتح بالبصمة أو رمز الجوال", "Unlock with fingerprint or PIN")) : null;
     const useKey = async () => {
+      msg.textContent = "";
+      const id = store.get("waraqa-key:" + uid);
       try {
-        await navigator.credentials.get({ publicKey: { challenge: crypto.getRandomValues(new Uint8Array(32)), allowCredentials: [{ type: "public-key", id: unb64(keyId) }], userVerification: "required", timeout: 60000 } });
+        if (id) {
+          await navigator.credentials.get({ publicKey: { challenge: crypto.getRandomValues(new Uint8Array(32)), allowCredentials: [{ type: "public-key", id: unb64(id) }], userVerification: "required", timeout: 60000 } });
+        } else {
+          // First time on this phone: the phone's lock is asked once to set it up, and it opens.
+          const cred = await navigator.credentials.create({ publicKey: {
+            challenge: crypto.getRandomValues(new Uint8Array(32)), rp: { name: "Waraqa" },
+            user: { id: new TextEncoder().encode(uid).slice(0, 64), name: ui.email || uid, displayName: ui.name || ui.email || uid },
+            pubKeyCredParams: [{ type: "public-key", alg: -7 }, { type: "public-key", alg: -257 }],
+            authenticatorSelection: { authenticatorAttachment: "platform", userVerification: "required", residentKey: "discouraged" }, timeout: 60000,
+          } });
+          if (!cred) throw new Error("no credential");
+          store.set("waraqa-key:" + uid, b64(cred.rawId));
+        }
         done();
       } catch (e) { msg.textContent = t("لم يتم التحقق. حاول مرة أخرى أو استخدم كلمة المرور.", "Not verified. Try again or use the password."); }
     };
@@ -556,7 +572,8 @@ export async function securityGate(ui) {
     out.onclick = () => signOut();
     const card = box(h("div", { fontSize: "40px", textAlign: "center" }, {}, "🔒"), h("h3", { margin: "0", textAlign: "center" }, {}, t("التطبيق مقفل", "The app is locked")),
       ...(bio ? [bio, note(t("أو بكلمة مرور الحساب:", "Or with the account password:"))] : []), pass, msg, open, out);
-    card.ownerDocument.defaultView?.setTimeout(() => (bio ? useKey() : pass.focus()), 50);
+    if (!deviceLock) card.insertBefore(note(t("هذا المتصفح لا يدعم الفتح بقفل الجوال، استخدم Chrome وتأكد أن قفل الشاشة مفعّل.", "This browser can't use the phone's lock; use Chrome with a screen lock set."), "#FFC857"), pass);
+    card.ownerDocument.defaultView?.setTimeout(() => (keyId && bio ? useKey() : bio ? null : pass.focus()), 50);
   });
   if (!useLock) return;
   await unlockOnce();
