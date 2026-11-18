@@ -1,7 +1,7 @@
 // The standalone runner of an exported web app (one app, no Waraqa screens around it): offline with
 // its data in this browser, or signed in to the team's cloud table. Used by app.html (hosted link)
 // and inlined into exported .html files by the Waraqa app (WebExport.kt), so keep it self-contained.
-import { runApp, offlineTable, isStrongPassword, rememberPassword, securityGate } from "./render.js";
+import { runApp, offlineTable, isStrongPassword, rememberPassword, securityGate, lockChoice, lockSettings } from "./render.js";
 
 // ---- The exported app's shell: runs the one app above, offline in this browser or on the team's cloud table ----
 export async function runStandalone(CONFIG, ICON) {
@@ -268,10 +268,11 @@ export async function runStandalone(CONFIG, ICON) {
       // The owner's security settings (My apps → Security): password check, lock, working offline.
       const security = { strongPasswords: true, lock: true, lockAfterMinutes: 2, offline: true, ...(data.security || {}) };
       try { localStorage.setItem("waraqa-sec:" + CONFIG.appId, JSON.stringify(security)); } catch (e) {}
+      const locks = lockChoice(CONFIG.appId, user.uid, security);
       if (unlockedUid !== user.uid && !user.isAnonymous) {
         await securityGate({
           uid: user.uid, email: user.email, name: user.displayName, el: stage, t, lang,
-          checkPassword: security.strongPasswords, lock: security.lock, lockAfterMs: security.lockAfterMinutes * 60000,
+          checkPassword: security.strongPasswords, device: locks.device, password: locks.password, lockAfterMs: security.lockAfterMinutes * 60000,
           verify: pw => fb.reauthenticateWithCredential(user, fb.EmailAuthProvider.credential(user.email, pw)),
           change: pw => fb.updatePassword(user, pw),
           signOut: () => fb.signOut(fb.auth),
@@ -293,6 +294,9 @@ export async function runStandalone(CONFIG, ICON) {
       setMenu([
         shareItem,
         canExport ? [t("تصدير البيانات إلى Excel", "Export data to Excel"), () => exportExcel(store)] : null,
+        // Each member picks the locks they want on their device (the owner's required ones stay on).
+        user.isAnonymous ? null : [t("قفل التطبيق", "App lock"), () => lockSettings({ appId: CONFIG.appId, uid: user.uid, security, t, lang,
+          onSaved: () => toast(t("تم حفظ إعدادات القفل.", "Lock settings saved.")) })],
         [user.isAnonymous ? t("خروج الضيف", "Leave as guest") : t("تسجيل الخروج", "Sign out"), () => { guestLeft = true; fb.signOut(fb.auth); }],
       ].filter(Boolean));
       runApp(stage, latest, store, { lang, t, toast, confirm: confirmBox, errorText, canEdit, canDelete, canExport, requestAccess, storeFor,

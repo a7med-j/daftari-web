@@ -442,11 +442,63 @@ const store = {
  * Remembers a password the user just typed (sign-in or sign-up), so this browser can open the app
  * with it offline; a strong one also passes the one-time security check.
  */
-export async function rememberPassword(uid, password) {
+export async function rememberPassword(uid, password, fresh = true) {
   if (!uid || !password || !crypto?.subtle) return;
+  if (fresh) sessionSet("waraqa-fresh:" + uid, "1");
   store.set("waraqa-pw:" + uid, await passwordHash(uid, password));
   store.set("waraqa-pw-ok:" + uid, isStrongPassword(password) ? "1" : null);
 }
+const sessionGet = k => { try { return sessionStorage.getItem(k); } catch (e) { return null; } };
+const sessionSet = (k, v) => { try { v == null ? sessionStorage.removeItem(k) : sessionStorage.setItem(k, v); } catch (e) {} };
+
+/**
+ * Which locks open an app on this browser: those its owner requires (My apps → Security), plus those
+ * the member turned on for themselves. Older settings had one "lock" switch: the phone's lock.
+ */
+export function lockChoice(appId, uid, security = {}) {
+  const owner = { device: security.lock !== false, password: security.passwordLock === true };
+  let mine = {};
+  try { mine = JSON.parse(store.get(`waraqa-mylock:${appId}:${uid}`) || "{}"); } catch (e) {}
+  return { owner, mine, device: owner.device || !!mine.device, password: owner.password || !!mine.password };
+}
+
+/** The member's own lock settings for an app: each lock on or off, except those the owner requires. */
+export function lockSettings({ appId, uid, security, t, lang, onSaved }) {
+  const choice = lockChoice(appId, uid, security);
+  const mine = { device: choice.device, password: choice.password };
+  const cover = h("div", { position: "fixed", inset: "0", background: "rgba(0,0,0,.55)", zIndex: "120", display: "flex", alignItems: "center", justifyContent: "center", padding: "16px" });
+  const row = (key, title, detail) => {
+    const forced = choice.owner[key];
+    const box = h("input", {}, { type: "checkbox" });
+    box.checked = mine[key];
+    box.disabled = forced;
+    box.style.cssText = "width:22px;height:22px;accent-color:#20B879;flex:none";
+    box.onchange = () => (mine[key] = box.checked);
+    return h("label", { display: "flex", gap: "12px", alignItems: "flex-start", padding: "12px", borderRadius: "12px", background: "#0E1E19", cursor: forced ? "default" : "pointer" }, {},
+      box,
+      h("div", { display: "flex", flexDirection: "column", gap: "4px" }, {},
+        h("b", { fontSize: "15px" }, {}, title),
+        h("span", { fontSize: "12px", color: "#9FB5AA" }, {}, detail),
+        forced ? h("span", { fontSize: "12px", color: "#FFC857" }, {}, t("مطلوب من صاحب التطبيق", "Required by the app's owner")) : null));
+  };
+  const save = h("button", { padding: "12px", borderRadius: "10px", border: "0", background: "#20B879", color: "#fff", fontSize: "15px", cursor: "pointer" }, {}, t("حفظ", "Save"));
+  const cancel = h("button", { padding: "10px", borderRadius: "10px", border: "0", background: "transparent", color: "#9FB5AA", fontSize: "14px", cursor: "pointer" }, {}, t("إلغاء", "Cancel"));
+  save.onclick = () => {
+    store.set(`waraqa-mylock:${appId}:${uid}`, JSON.stringify({ device: mine.device && !choice.owner.device, password: mine.password && !choice.owner.password }));
+    cover.remove();
+    onSaved?.(lockChoice(appId, uid, security));
+  };
+  cancel.onclick = () => cover.remove();
+  cover.onclick = e => { if (e.target === cover) cover.remove(); };
+  cover.append(h("div", { maxWidth: "380px", width: "100%", padding: "20px", borderRadius: "16px", background: "#172C24", color: "#fff", display: "flex", flexDirection: "column", gap: "10px" }, { dir: lang === "en" ? "ltr" : "rtl" },
+    h("h3", { margin: "0" }, {}, t("قفل التطبيق", "App lock")),
+    h("p", { margin: "0", fontSize: "13px", color: "#9FB5AA" }, {}, t("اختر ما يُطلب عند فتح التطبيق على هذا الجهاز، أو لا شيء.", "Choose what is asked when the app opens on this device, or nothing.")),
+    row("device", t("البصمة أو رمز الجوال", "Fingerprint or phone PIN"), t("قفل شاشة جوالك نفسه (البصمة أو الوجه أو الرمز).", "Your phone's own screen lock (fingerprint, face or PIN).")),
+    row("password", t("كلمة مرور الحساب", "Account password"), t("تكتب كلمة مرور حسابك عند الفتح.", "Type your account password when opening.")),
+    save, cancel));
+  document.body.append(cover);
+}
+
 export function forgetSecurity(uid) {
   for (const k of ["waraqa-pw:", "waraqa-pw-ok:", "waraqa-key:"]) store.set(k + uid, null);
 }
@@ -459,7 +511,8 @@ export function forgetSecurity(uid) {
 export async function securityGate(ui) {
   const { uid, el, t, verify, change, signOut } = ui;
   // The app owner's choices (My apps → Security): the password check, the lock and its delay.
-  const checkPassword = ui.checkPassword !== false, useLock = ui.lock !== false, lockAfterMs = ui.lockAfterMs || 2 * 60 * 1000;
+  // device: the phone's own lock (fingerprint, face or PIN); password: the account password.
+  const checkPassword = ui.checkPassword !== false, useDevice = !!ui.device, usePassword = !!ui.password, lockAfterMs = ui.lockAfterMs || 2 * 60 * 1000;
   const box = (...kids) => {
     const card = h("div", { maxWidth: "380px", margin: "40px auto", padding: "20px", borderRadius: "16px", background: "#172C24", color: "#fff", display: "flex", flexDirection: "column", gap: "10px" }, { dir: ui.lang === "en" ? "ltr" : "rtl" }, ...kids);
     el.replaceChildren(card);
@@ -501,38 +554,12 @@ export async function securityGate(ui) {
     });
   }
 
-  /** Asks once to open with the phone's own lock next time; the button gives the browser the tap it needs. */
-  const offerDeviceLock = () => new Promise(done => {
-    const yes = button(t("تفعيل الفتح بقفل الجوال", "Use the phone's lock")), later = button(t("لاحقًا", "Later"), false);
-    const msg = note("", "#FF8A80");
-    yes.onclick = async () => {
-      try {
-        const cred = await navigator.credentials.create({ publicKey: {
-          challenge: crypto.getRandomValues(new Uint8Array(32)), rp: { name: "Waraqa" },
-          user: { id: new TextEncoder().encode(uid).slice(0, 64), name: ui.email || uid, displayName: ui.name || ui.email || uid },
-          pubKeyCredParams: [{ type: "public-key", alg: -7 }, { type: "public-key", alg: -257 }],
-          authenticatorSelection: { authenticatorAttachment: "platform", userVerification: "required", residentKey: "discouraged" }, timeout: 60000,
-        } });
-        if (cred) store.set("waraqa-key:" + uid, b64(cred.rawId));
-        done();
-      } catch (e) { msg.textContent = t("لم يتم التفعيل: ", "Not turned on: ") + (e?.message || e); }
-    };
-    later.onclick = () => done();
-    box(h("div", { fontSize: "40px", textAlign: "center" }, {}, "🔐"),
-      h("h3", { margin: "0", textAlign: "center" }, {}, t("افتح بقفل جوالك", "Open with your phone's lock")),
-      note(t("في المرات القادمة يفتح التطبيق بالبصمة أو الوجه أو رمز الجوال، بدل كلمة مرور الحساب.", "Next time the app opens with your fingerprint, face or phone PIN instead of the account password.")),
-      yes, msg, later);
-  });
+  const isAvailable = async () => !!window.PublicKeyCredential && !!(await PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable?.().catch(() => false));
+  const signOutButton = () => { const out = button(t("تسجيل الخروج", "Sign out"), false); out.onclick = () => signOut(); return out; };
 
-  // 2. The lock: on opening, and when back after more than two minutes away.
-  const unlockOnce = () => new Promise(async done => {
-    const keyId = store.get("waraqa-key:" + uid), hash = store.get("waraqa-pw:" + uid);
-    if (!keyId && !hash) return done(); // nothing known on this browser yet: opens (the check above sets it)
-    // The phone's own lock (fingerprint, face or PIN), when this browser can use it.
-    const deviceLock = !!window.PublicKeyCredential && !!(await PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable?.().catch(() => false));
-    const pass = input(t("كلمة مرور الحساب", "Account password"));
-    const msg = note("", "#FF8A80"), open = button(t("فتح", "Open"));
-    const bio = deviceLock ? button(t("فتح بالبصمة أو رمز الجوال", "Unlock with fingerprint or PIN")) : null;
+  /** The phone's own lock (fingerprint, face or PIN); the first time it is set up with one tap. */
+  const deviceStep = () => new Promise(done => {
+    const msg = note("", "#FF8A80"), bio = button(t("فتح بالبصمة أو رمز الجوال", "Unlock with fingerprint or PIN"));
     const useKey = async () => {
       msg.textContent = "";
       const id = store.get("waraqa-key:" + uid);
@@ -540,7 +567,6 @@ export async function securityGate(ui) {
         if (id) {
           await navigator.credentials.get({ publicKey: { challenge: crypto.getRandomValues(new Uint8Array(32)), allowCredentials: [{ type: "public-key", id: unb64(id) }], userVerification: "required", timeout: 60000 } });
         } else {
-          // First time on this phone: the phone's lock is asked once to set it up, and it opens.
           const cred = await navigator.credentials.create({ publicKey: {
             challenge: crypto.getRandomValues(new Uint8Array(32)), rp: { name: "Waraqa" },
             user: { id: new TextEncoder().encode(uid).slice(0, 64), name: ui.email || uid, displayName: ui.name || ui.email || uid },
@@ -553,36 +579,45 @@ export async function securityGate(ui) {
         done();
       } catch (e) { msg.textContent = t("لم يتم التحقق. اضغط الزر للمحاولة مرة أخرى.", "Not verified. Tap the button to try again."); }
     };
-    if (bio) bio.onclick = useKey;
-    open.onclick = async () => {
+    bio.onclick = useKey;
+    const card = box(h("div", { fontSize: "40px", textAlign: "center" }, {}, "🔒"), h("h3", { margin: "0", textAlign: "center" }, {}, t("التطبيق مقفل", "The app is locked")), bio, msg, signOutButton());
+    // Opens the phone's lock at once when it is already set up (the first time needs the tap).
+    if (store.get("waraqa-key:" + uid)) card.ownerDocument.defaultView?.setTimeout(useKey, 50);
+  });
+
+  /** The account password: checked on this browser (also offline), or with the server. */
+  const passwordStep = () => new Promise(done => {
+    const hash = store.get("waraqa-pw:" + uid);
+    const pass = input(t("كلمة مرور الحساب", "Account password"));
+    const msg = note("", "#FF8A80"), open = button(t("فتح", "Open"));
+    const go = async () => {
       msg.textContent = "";
       try {
         const ok = hash ? (await passwordHash(uid, pass.value)) === hash : (await verify(pass.value), true);
         if (!ok) return (msg.textContent = t("كلمة المرور غير صحيحة.", "Wrong password."));
-        await rememberPassword(uid, pass.value);
-        // Next time: the phone's own lock (fingerprint, face or PIN) instead of the password.
-        if (!store.get("waraqa-key:" + uid) && window.PublicKeyCredential
-          && await PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable?.().catch(() => false)) {
-          await offerDeviceLock();
-        }
+        await rememberPassword(uid, pass.value, false);
         done();
-      } catch (e) { msg.textContent = t("كلمة المرور غير صحيحة.", "Wrong password."); }
+      } catch (e) {
+        msg.textContent = /network/.test(String(e?.code)) ? t("يحتاج اتصالًا بالإنترنت أول مرة.", "The first time needs a connection.") : t("كلمة المرور غير صحيحة.", "Wrong password.");
+      }
     };
-    const out = button(t("تسجيل الخروج", "Sign out"), false);
-    out.onclick = () => signOut();
-    // With the phone's lock set up, the password stays hidden behind a small link (if the lock fails).
-    const withPassword = h("div", { display: "flex", flexDirection: "column", gap: "10px" }, {}, pass, open);
-    const showPassword = button(t("استخدام كلمة مرور الحساب", "Use the account password"), false);
-    showPassword.style.fontSize = "13px";
-    showPassword.onclick = () => { withPassword.style.display = "flex"; showPassword.remove(); pass.focus(); };
-    if (bio) withPassword.style.display = "none";
-    const card = box(h("div", { fontSize: "40px", textAlign: "center" }, {}, "🔒"), h("h3", { margin: "0", textAlign: "center" }, {}, t("التطبيق مقفل", "The app is locked")),
-      ...(bio ? [bio, showPassword] : []), withPassword, msg, out);
-    if (!deviceLock) card.insertBefore(note(t("هذا المتصفح لا يدعم الفتح بقفل الجوال؛ تأكد أن قفل الشاشة مفعّل.", "This browser can't use the phone's lock; make sure a screen lock is set."), "#FFC857"), withPassword);
-    card.ownerDocument.defaultView?.setTimeout(() => (keyId && bio ? useKey() : bio ? null : pass.focus()), 50);
+    open.onclick = go;
+    pass.onkeydown = e => { if (e.key === "Enter") go(); };
+    const card = box(h("div", { fontSize: "40px", textAlign: "center" }, {}, "🔑"), h("h3", { margin: "0", textAlign: "center" }, {}, t("التطبيق مقفل", "The app is locked")), pass, open, msg, signOutButton());
+    card.ownerDocument.defaultView?.setTimeout(() => pass.focus(), 50);
   });
-  if (!useLock) return;
-  await unlockOnce();
+
+  // 2. The lock: on opening, and when back after some minutes away. Each kind is its own step;
+  // a browser that can't use the phone's lock asks for the account password instead.
+  const unlockOnce = async () => {
+    const deviceOk = useDevice && await isAvailable();
+    if (deviceOk) await deviceStep();
+    if (usePassword || (useDevice && !deviceOk)) await passwordStep();
+  };
+  if (!useDevice && !usePassword) return;
+  // Right after signing in (the password was just typed) it opens without asking again.
+  if (!ui.watching && sessionGet("waraqa-fresh:" + uid)) sessionSet("waraqa-fresh:" + uid, null);
+  else await unlockOnce();
 
   // Locks again after some minutes in the background (the app stays underneath).
   if (!ui.watching) {

@@ -11,7 +11,7 @@ import {
   query, where, runTransaction, serverTimestamp, Bytes,
 } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore.js";
 import { firebaseConfig } from "./config.js";
-import { runApp, useAppManifest, offlineTable, isStrongPassword, rememberPassword, securityGate } from "./render.js";
+import { runApp, useAppManifest, offlineTable, isStrongPassword, rememberPassword, securityGate, lockChoice, lockSettings } from "./render.js";
 
 // Pages kept in this browser, so the site also opens without a connection.
 if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js").catch(() => {});
@@ -247,15 +247,19 @@ async function appView(user, appId) {
       document.title = project.name;
       // The owner's security settings (My apps → Security): lock and working offline.
       const security = { strongPasswords: true, lock: true, lockAfterMinutes: 2, offline: true, ...(data.security || {}) };
-      if (security.lock && lockedApps.get(appId) !== user.uid) {
+      const locks = lockChoice(appId, user.uid, security);
+      if ((locks.device || locks.password) && lockedApps.get(appId) !== user.uid) {
         await securityGate({
           uid: user.uid, email: user.email, name: user.displayName, el: stage, t, lang, checkPassword: false,
-          lockAfterMs: security.lockAfterMinutes * 60000,
+          device: locks.device, password: locks.password, lockAfterMs: security.lockAfterMinutes * 60000,
           verify: pw => reauthenticateWithCredential(user, EmailAuthProvider.credential(user.email, pw)),
           change: pw => updatePassword(user, pw), signOut: () => signOut(auth),
         });
         lockedApps.set(appId, user.uid);
       }
+      // Each member picks the locks they want for this app (the owner's required ones stay on).
+      wrap.append(el("button", { class: "close", style: "inset-inline-start:auto;inset-inline-end:10px",
+        onclick: () => lockSettings({ appId, uid: user.uid, security, t, lang, onSaved: () => toast(t("تم حفظ إعدادات القفل.", "Lock settings saved.")) }) }, "🔒 " + t("القفل", "Lock")));
       // "Add to home screen" now opens this app directly.
       useAppManifest(project.name, location.pathname + "?app=" + encodeURIComponent(appId), project.icon || "icon-512.png");
       // The owner and members the owner made editors may change records; other members only look.
