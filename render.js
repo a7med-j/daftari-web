@@ -737,16 +737,42 @@ export function offlineTable(fs, col, headers, author, allowOffline = true) {
   const keep = op => { saveQueue([...queue(), op]); lastOffline = true; };
   if (typeof window !== "undefined") window.addEventListener("online", () => { if (queue().length) flush().catch(() => {}); });
 
+  const fromDocs = docs => {
+    const stored = [...docs].sort((a, b) => (a.id < b.id ? -1 : 1)).flatMap(d => readRows(d.data().rows).map(r => ({ ...r, chunk: d.id })));
+    snapshot = applyPending(stored, queue());
+    return [headers, ...snapshot.map(r => r.c)];
+  };
+  // Told when the server's rows arrive after a quick read from the kept copy, and they differ.
+  const freshListeners = new Set();
+  let refreshing = null;
+
   return {
     headers,
-    async rows() {
+    /**
+     * The rows, headers first. [quick]: from the copy kept in this browser when there is one (shows
+     * at once), while the server's are read in the background (see onFresh). Checks before saving
+     * read without it, so they always see the latest.
+     */
+    async rows(quick = false) {
+      if (quick && fs.getDocsFromCache && !queue().length) {
+        try {
+          const kept = await fs.getDocsFromCache(col);
+          if (!kept.empty) {
+            const result = fromDocs(kept.docs);
+            const before = JSON.stringify(result);
+            refreshing ||= this.rows().then(rows => {
+              if (JSON.stringify(rows) !== before) freshListeners.forEach(listener => listener(rows));
+            }).catch(() => {}).finally(() => (refreshing = null));
+            return result;
+          }
+        } catch (e) { /* nothing kept yet: read normally */ }
+      }
       if (queue().length && navigator.onLine) await flush().catch(() => {});
       // Offline, Firestore answers from the copy kept in this browser.
-      const docs = (await fs.getDocs(col)).docs.sort((a, b) => (a.id < b.id ? -1 : 1));
-      const stored = docs.flatMap(d => readRows(d.data().rows).map(r => ({ ...r, chunk: d.id })));
-      snapshot = applyPending(stored, queue());
-      return [headers, ...snapshot.map(r => r.c)];
+      return fromDocs((await fs.getDocs(col)).docs);
     },
+    /** Calls [listener] with the server's rows when they differ from a quick read; returns the way to stop. */
+    onFresh(listener) { freshListeners.add(listener); return () => freshListeners.delete(listener); },
     authors() { return snapshot.map(r => r.by || ""); },
     authorNames() { return snapshot.map(r => r.byName || ""); },
     savedOffline() { return lastOffline; },
@@ -1175,6 +1201,7 @@ export function runScreen(root, project, screen, store, opts) {
   const storeOf = id => (id ? (storeCache[id] ??= opts.storeFor?.(id) || null) : mainStore);
   if (fileId) store = storeOf(fileId);
   const otherRows = {};
+  let freshOff = []; // stops the updates from the server when this screen closes
   const headers = store ? store.headers : [];
   const binds = bindings(screen, headers);
   // Typed values are shared by all screens of the app, so they survive moving between screens.
@@ -1252,7 +1279,9 @@ export function runScreen(root, project, screen, store, opts) {
     const s = storeOf(id);
     if (s && !loadingFiles.has(id)) {
       loadingFiles.add(id);
-      s.rows().then(rows => { otherRows[id] = rows; tables.forEach(draw => draw()); statLabels.forEach(update => update()); }).catch(e => toast(opts.errorText(e))).finally(() => loadingFiles.delete(id));
+      const show = rows => { otherRows[id] = rows; tables.forEach(draw => draw()); statLabels.forEach(update => update()); };
+      freshOff.push(s.onFresh?.(show));
+      s.rows(true).then(show).catch(e => toast(opts.errorText(e))).finally(() => loadingFiles.delete(id));
     }
     return s ? [s.headers || []] : null;
   };
@@ -1387,23 +1416,31 @@ export function runScreen(root, project, screen, store, opts) {
 
   async function reloadTables() {
     if (!store) return;
+    // Rows show from the kept copy at once; when the server's differ they replace them.
+    freshOff.forEach(off => off?.());
+    freshOff = [];
     // Other files read by this screen.
     const reads = new Set(screen.components.flatMap(c => [
       prop(c, "lookupField") ? prop(c, "lookupFile") : null, prop(c, "optionsColumn") ? prop(c, "optionsFile") : null,
     ]).filter(id => id != null && id !== fileId));
     for (const id of reads) {
       const s = storeOf(id);
-      if (s) s.rows().then(rows => { otherRows[id] = rows; recompute(); Object.values(optionRefreshers).forEach(r => r()); }).catch(() => {});
+      if (!s) continue;
+      const show = rows => { otherRows[id] = rows; recompute(); Object.values(optionRefreshers).forEach(r => r()); };
+      freshOff.push(s.onFresh?.(show));
+      s.rows(true).then(show).catch(() => {});
     }
     const listsFromSheet = screen.components.some(c => c.type === "CHART" || prop(c, "optionsColumn") || prop(c, "scan") === "record" || (c.type === "LABEL" && prop(c, "stat"))
       || prop(c, "action") === "upsertRow" || prop(c, "lookupField"));
     if (!tables.length && !listsFromSheet) { state.sheetRows = null; return; } // suggestions read the sheet again when needed
-    try {
-      state.sheetRows = await store.rows();
+    const show = rows => {
+      state.sheetRows = rows;
       tables.forEach(draw => draw());
       Object.values(optionRefreshers).forEach(redraw => redraw());
       statLabels.forEach(update => update());
-    } catch (e) { toast(opts.errorText(e)); }
+    };
+    freshOff.push(store.onFresh?.(show));
+    try { show(await store.rows(true)); } catch (e) { toast(opts.errorText(e)); }
   }
 
   /** What a search button looks for (see FormLogic.searchCriteria). */
@@ -2070,7 +2107,7 @@ export function runScreen(root, project, screen, store, opts) {
     toast(t(`تم عرض الصف ${opts.openRow}`, `Showing row ${opts.openRow}`));
   }
   reloadTables();
-  return () => window.removeEventListener("resize", fit);
+  return () => { window.removeEventListener("resize", fit); freshOff.forEach(off => off?.()); };
 }
 
 /**

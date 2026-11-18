@@ -225,7 +225,7 @@ export async function runStandalone(CONFIG, ICON) {
     const col = fileId ? fb.collection(db, "apps", appId, "tables", fileId, "chunks") : fb.collection(db, "apps", appId, "chunks");
     const photoCache = new Map();
     // Works offline too: changes wait in this browser and go up when the connection is back.
-    const table = offlineTable({ db, doc: fb.doc, getDocs: fb.getDocs, getDocsFromServer: fb.getDocsFromServer, runTransaction: fb.runTransaction, serverTimestamp: fb.serverTimestamp },
+    const table = offlineTable({ db, doc: fb.doc, getDocs: fb.getDocs, getDocsFromServer: fb.getDocsFromServer, getDocsFromCache: fb.getDocsFromCache, runTransaction: fb.runTransaction, serverTimestamp: fb.serverTimestamp },
       col, headers, () => authorOf(fb.auth.currentUser), offline);
     return Object.assign(table, {
       async savePhoto(name, jpeg) {
@@ -256,13 +256,25 @@ export async function runStandalone(CONFIG, ICON) {
   }
 
   let unlockedUid = null;
-  async function openShared(user) {
+  /** A document from this browser's kept copy when there is one (opens at once), otherwise from the server. */
+  const keptDoc = async ref => { try { const c = await fb.getDocFromCache(ref); if (c.exists()) return c; } catch (e) {} return null; };
+
+  async function openShared(user, fromServer = false) {
     stage.replaceChildren(node("div", { class: "center" }, node("p", { class: "muted" }, t("جارٍ الفتح…", "Opening…"))));
     try {
-      let snap;
-      try { snap = await fb.getDoc(fb.doc(db, "apps", CONFIG.appId)); }
-      catch (e) { if (!String(e.code).includes("permission-denied")) throw e; await join(user); snap = await fb.getDoc(fb.doc(db, "apps", CONFIG.appId)); }
+      const appRef = fb.doc(db, "apps", CONFIG.appId);
+      let snap = fromServer ? null : await keptDoc(appRef);
+      const kept = !!snap;
+      if (!snap) {
+        try { snap = await fb.getDoc(appRef); }
+        catch (e) { if (!String(e.code).includes("permission-denied")) throw e; await join(user); snap = await fb.getDoc(appRef); }
+      }
       if (!snap.exists()) throw fail("not-found-code");
+      // Opened from the kept copy: the server is asked in the background. A new design or settings
+      // are kept for next time; if access was removed or the app paused, it opens again from the server
+      // (which shows why).
+      if (kept) fb.getDocFromServer(appRef).then(s => { if (!s.exists()) openShared(user, true); })
+        .catch(e => { if (String(e.code).includes("permission-denied")) openShared(user, true); });
       const data = snap.data();
       const latest = JSON.parse(data.json); // the owner's latest published design
       // The owner's security settings (My apps → Security): password check, lock, working offline.
@@ -284,7 +296,10 @@ export async function runStandalone(CONFIG, ICON) {
       const storeFor = id => { const f = (latest.files || []).find(x => x.id === id); return f ? cloudStore(CONFIG.appId, f.link.headers || [], id, security.offline) : null; };
       // The owner and members the owner made editors may change records; other members only look.
       const owner = data.ownerUid === user.uid;
-      const editor = owner || (await fb.getDoc(fb.doc(db, "apps", CONFIG.appId, "members", user.uid))).data()?.role === "editor";
+      const memberRef = fb.doc(db, "apps", CONFIG.appId, "members", user.uid);
+      const member = owner ? null : (await keptDoc(memberRef)) || await fb.getDoc(memberRef).catch(() => null);
+      if (!owner && kept) fb.getDocFromServer(memberRef).catch(() => {}); // the role, fresh for next time
+      const editor = owner || member?.data()?.role === "editor";
       const canEdit = editor;
       // The owner's choices: who deletes, who exports, whether viewers may ask for rights.
       const canDelete = owner || (editor && security.whoDeletes !== "owner");

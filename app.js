@@ -8,6 +8,7 @@ import {
 } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-auth.js";
 import {
   initializeFirestore, persistentLocalCache, persistentMultipleTabManager, doc, getDoc, setDoc, deleteDoc, collection, getDocs, getDocsFromServer,
+  getDocFromCache, getDocFromServer, getDocsFromCache,
   query, where, runTransaction, serverTimestamp, Bytes,
 } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore.js";
 import { firebaseConfig } from "./config.js";
@@ -97,7 +98,7 @@ function cloudStore(appId, headers, fileId = "", offline = true) {
   // Extra files of the project keep their records under tables/{fileId}.
   const col = fileId ? collection(db, "apps", appId, "tables", fileId, "chunks") : collection(db, "apps", appId, "chunks");
   const photoCache = new Map();
-  const table = offlineTable({ db, doc, getDocs, getDocsFromServer, runTransaction, serverTimestamp }, col, headers, () => authorOf(auth.currentUser), offline);
+  const table = offlineTable({ db, doc, getDocs, getDocsFromServer, getDocsFromCache, runTransaction, serverTimestamp }, col, headers, () => authorOf(auth.currentUser), offline);
   return Object.assign(table, {
     // Photos: one compressed JPEG per document, shown from a small in-memory cache.
     async savePhoto(name, jpeg) {
@@ -234,15 +235,26 @@ async function openApp(appId) {
   route();
 }
 
+/** Apps to open from the server next time (their kept copy was found out of date). */
+const fromServer = new Set();
+
 async function appView(user, appId) {
   const stage = el("div", { class: "stage" });
   const close = el("button", { class: "close", onclick: () => { history.replaceState(null, "", location.pathname); route(); } }, "✕ " + t("إغلاق", "Close"));
   const wrap = el("div", { class: "runner" }, close, stage);
   stage.append(el("p", { class: "muted" }, t("جارٍ فتح التطبيق…", "Opening the app…")));
+  // A document from this browser's kept copy when there is one (opens at once), otherwise the server's.
+  const keptDoc = async ref => { try { const c = await getDocFromCache(ref); if (c.exists()) return c; } catch (e) {} return null; };
   (async () => {
     try {
-      const snap = await getDoc(doc(db, "apps", appId));
+      const appRef = doc(db, "apps", appId);
+      const kept = fromServer.delete(appId) ? null : await keptDoc(appRef);
+      const snap = kept || await getDoc(appRef);
       if (!snap.exists()) throw fail("app-gone");
+      // Opened from the kept copy: the server is asked in the background (kept for next time); if the
+      // app is gone or access was removed, it opens again from the server, which says why.
+      const again = () => { fromServer.add(appId); route(); };
+      if (kept) getDocFromServer(appRef).then(s => { if (!s.exists()) again(); }).catch(e => { if (String(e.code).includes("permission-denied")) again(); });
       const data = snap.data();
       const project = JSON.parse(data.json);
       document.title = project.name;
@@ -265,7 +277,10 @@ async function appView(user, appId) {
       useAppManifest(project.name, location.pathname + "?app=" + encodeURIComponent(appId), project.icon || "icon-512.png");
       // The owner and members the owner made editors may change records; other members only look.
       const owner = data.ownerUid === user.uid;
-      const editor = owner || (await getDoc(doc(db, "apps", appId, "members", user.uid))).data()?.role === "editor";
+      const memberRef = doc(db, "apps", appId, "members", user.uid);
+      const member = owner ? null : (await keptDoc(memberRef)) || await getDoc(memberRef).catch(() => null);
+      if (!owner && kept) getDocFromServer(memberRef).catch(() => {}); // the role, fresh for next time
+      const editor = owner || member?.data()?.role === "editor";
       const canEdit = editor;
       const canDelete = owner || (editor && security.whoDeletes !== "owner");
       const who = security.whoExports || "everyone";
