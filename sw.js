@@ -1,13 +1,16 @@
-// Keeps Waraqa's web pages and the Firebase library in this browser, so installed apps open without
-// a connection. Pages and scripts: the network first (always the latest), the kept copy when offline.
-// The Firebase library (fixed versions): the kept copy first. Data itself is kept by Firestore.
-const CACHE = "waraqa-v2";
+// Keeps Waraqa's web pages and the Firebase library in this browser, so apps open at once and also
+// without a connection. Pages and scripts: the kept copy right away, while the latest is fetched in
+// the background; when it changed, open pages are told (they refresh). The Firebase library (fixed
+// versions): the kept copy. Data itself is kept by Firestore.
+const CACHE = "waraqa-v3";
 
 self.addEventListener("install", () => self.skipWaiting());
 self.addEventListener("activate", e => e.waitUntil((async () => {
   for (const k of await caches.keys()) if (k !== CACHE) await caches.delete(k);
   await self.clients.claim();
 })()));
+
+const versionOf = res => res && (res.headers.get("etag") || res.headers.get("last-modified") || "");
 
 self.addEventListener("fetch", e => {
   const req = e.request;
@@ -16,24 +19,25 @@ self.addEventListener("fetch", e => {
   const sameSite = url.origin === location.origin;
   const library = url.hostname === "www.gstatic.com" && url.pathname.startsWith("/firebasejs/");
   if (!sameSite && !library) return; // Firestore, sign-in and other calls go straight to the network
-  if (library) {
-    e.respondWith(caches.open(CACHE).then(async cache => {
-      const kept = await cache.match(req);
-      if (kept) return kept;
-      const res = await fetch(req);
-      if (res.ok) cache.put(req, res.clone());
-      return res;
-    }));
-    return;
-  }
   e.respondWith((async () => {
     const cache = await caches.open(CACHE);
-    try {
-      const res = await fetch(req, { cache: "no-cache" }); // skip the browser's short-term copy: always the latest
-      if (res.ok) cache.put(req, res.clone());
+    const kept = await cache.match(req);
+    if (library && kept) return kept;
+    // The latest copy (skipping the browser's short-term copy), kept for next time.
+    const latest = fetch(req, { cache: "no-cache" }).then(async res => {
+      if (res.ok) {
+        await cache.put(req, res.clone());
+        if (kept && !library && versionOf(kept) !== versionOf(res)) {
+          for (const c of await self.clients.matchAll({ type: "window" })) c.postMessage({ type: "waraqa-updated" });
+        }
+      }
       return res;
-    } catch (err) {
-      return (await cache.match(req)) || (await cache.match(req, { ignoreSearch: true })) || Response.error();
+    });
+    if (kept) {
+      e.waitUntil(latest.catch(() => {}));
+      return kept;
     }
+    try { return await latest; }
+    catch (err) { return (await cache.match(req, { ignoreSearch: true })) || Response.error(); }
   })());
 });

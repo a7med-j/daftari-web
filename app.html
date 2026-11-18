@@ -40,7 +40,7 @@ html, body { margin: 0; min-height: 100%; background: var(--ink); color: #fff; f
 // A web app exported from Waraqa, opened by its link: app.html?id=<project id>. Its design, name and
 // icon are public (webApps/{id}); its data stays in this browser or behind sign-in on the cloud table.
 import { runStandalone } from "./standalone.js";
-import { useAppManifest } from "./render.js";
+import { useAppManifest, watchUpdates } from "./render.js";
 import { firebaseConfig } from "./config.js";
 
 const stage = document.getElementById("stage");
@@ -49,24 +49,26 @@ const id = new URLSearchParams(location.search).get("id");
 const value = v => v == null ? null : "stringValue" in v ? v.stringValue : "arrayValue" in v ? (v.arrayValue.values || []).map(value) : null;
 // Pages kept in this browser, so the app also opens without a connection.
 if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js").catch(() => {});
+watchUpdates((ar, en) => (navigator.language.startsWith("en") ? en : ar));
 // Asks the browser to keep this site's data (sign-in, saved records) even when space runs low.
 navigator.storage?.persist?.().catch(() => {});
 try {
   if (!id || !/^[\w-]{1,80}$/.test(id)) throw new Error("bad id");
   const url = `https://firestore.googleapis.com/v1/projects/${firebaseConfig.projectId}/databases/(default)/documents/webApps/${id}?key=${firebaseConfig.apiKey}`;
-  // The app's design, kept in this browser for opening it offline.
+  // The app's details, kept in this browser: opens at once from the kept copy (also offline) while
+  // the latest is fetched for next time; the first time it waits for it.
   const keptKey = "waraqa-webapp:" + id;
-  let f;
-  try {
+  const fetchLatest = async () => {
     const res = await fetch(url);
     if (!res.ok) throw new Error(String(res.status));
-    f = (await res.json()).fields || {};
-    try { localStorage.setItem(keptKey, JSON.stringify(f)); } catch (e) {}
-  } catch (e) {
-    const kept = localStorage.getItem(keptKey);
-    if (!kept) throw e;
-    f = JSON.parse(kept);
-  }
+    const fields = (await res.json()).fields || {};
+    try { localStorage.setItem(keptKey, JSON.stringify(fields)); } catch (e) {}
+    return fields;
+  };
+  let f = null;
+  try { f = JSON.parse(localStorage.getItem(keptKey) || "null"); } catch (e) {}
+  if (f) fetchLatest().catch(() => {});
+  else f = await fetchLatest();
   const config = {
     name: value(f.name) || "", mode: value(f.mode) || "personal", projectJson: value(f.json) || "{}",
     appId: value(f.appId) || "", shareCode: value(f.shareCode) || "", id, headers: value(f.headers) || [],

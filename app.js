@@ -11,10 +11,11 @@ import {
   query, where, runTransaction, serverTimestamp, Bytes,
 } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore.js";
 import { firebaseConfig } from "./config.js";
-import { runApp, useAppManifest, offlineTable, isStrongPassword, rememberPassword, securityGate, lockChoice, lockSettings } from "./render.js";
+import { watchUpdates, runApp, useAppManifest, offlineTable, isStrongPassword, rememberPassword, securityGate, lockChoice, lockSettings } from "./render.js";
 
 // Pages kept in this browser, so the site also opens without a connection.
 if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js").catch(() => {});
+watchUpdates((ar, en) => t(ar, en));
 // Asks the browser to keep this site's data (sign-in, saved records) even when space runs low.
 navigator.storage?.persist?.().catch(() => {});
 
