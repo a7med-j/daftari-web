@@ -126,7 +126,12 @@ async function join(user, code) {
   if (ownerUid !== user.uid) {
     // Already a member: joining again keeps the membership (and the access the owner gave).
     const member = await getDoc(doc(db, "apps", appId, "members", user.uid)).catch(() => null);
-    if (!member?.exists()) await setDoc(doc(db, "apps", appId, "members", user.uid), { code, email: user.email || "", name: (user.displayName || "").trim(), joinedAt: Date.now() });
+    if (!member?.exists()) {
+      const fields = { code, email: user.email || "", name: (user.displayName || "").trim(), joinedAt: Date.now() };
+      // Editors at once when the owner chose so (the rules refuse it otherwise, then as a viewer).
+      await setDoc(doc(db, "apps", appId, "members", user.uid), { ...fields, role: "editor" })
+        .catch(e => { if (!String(e.code).includes("permission-denied")) throw e; return setDoc(doc(db, "apps", appId, "members", user.uid), fields); });
+    }
   }
   const app = await getDoc(doc(db, "apps", appId));
   if (!app.exists()) throw fail("app-gone");
@@ -254,18 +259,25 @@ async function appView(user, appId) {
       // "Add to home screen" now opens this app directly.
       useAppManifest(project.name, location.pathname + "?app=" + encodeURIComponent(appId), project.icon || "icon-512.png");
       // The owner and members the owner made editors may change records; other members only look.
-      const canEdit = data.ownerUid === user.uid || (await getDoc(doc(db, "apps", appId, "members", user.uid))).data()?.role === "editor";
-      const requestAccess = () => setDoc(doc(db, "apps", appId, "requests", user.uid), { email: user.email || "", name: (user.displayName || "").trim(), at: Date.now() });
+      const owner = data.ownerUid === user.uid;
+      const editor = owner || (await getDoc(doc(db, "apps", appId, "members", user.uid))).data()?.role === "editor";
+      const canEdit = editor;
+      const canDelete = owner || (editor && security.whoDeletes !== "owner");
+      const who = security.whoExports || "everyone";
+      const canExport = owner || who === "everyone" || (who === "editors" && editor);
+      const requestAccess = security.allowRequests === false ? null : () => setDoc(doc(db, "apps", appId, "requests", user.uid), { email: user.email || "", name: (user.displayName || "").trim(), at: Date.now() });
       const storeFor = id => { const f = (project.files || []).find(x => x.id === id); return f ? cloudStore(appId, f.link.headers || [], id, security.offline) : null; };
       const app = runApp(stage, project, cloudStore(appId, data.headers || [], "", security.offline), {
         storeFor,
         user: { uid: user.uid, name: (user.displayName || "").trim(), email: user.email || "" },
-        lang, t, toast, confirm: confirmBox, errorText, canEdit, requestAccess,
+        lang, t, toast, confirm: confirmBox, errorText, canEdit, canDelete, canExport, requestAccess,
         onScreen: screen => { wrap.style.background = cssBackground(screen); },
       });
       cleanup = app.cleanup;
     } catch (e) {
-      stage.replaceChildren(el("p", { class: "muted" }, errorText(e)));
+      // Paused by its owner: show the owner's message.
+      const info = (await getDoc(doc(db, "publicApps", appId)).catch(() => null))?.data();
+      stage.replaceChildren(el("p", { class: "muted" }, info?.paused ? (info.pausedMessage || t("التطبيق متوقف مؤقتًا من صاحبه.", "The app is paused by its owner.")) : errorText(e)));
     }
   })();
   return wrap;

@@ -247,7 +247,11 @@ export async function runStandalone(CONFIG, ICON) {
     const codeDoc = await fb.getDoc(fb.doc(db, "shareCodes", CONFIG.shareCode));
     if (!codeDoc.exists() || codeDoc.data().appId !== CONFIG.appId) throw fail("not-found-code");
     if (codeDoc.data().ownerUid !== user.uid) {
-      await fb.setDoc(fb.doc(db, "apps", CONFIG.appId, "members", user.uid), { code: CONFIG.shareCode, email: user.email || "", name: (user.displayName || "").trim(), joinedAt: Date.now() });
+      const fields = { code: CONFIG.shareCode, email: user.email || "", name: (user.displayName || "").trim(), joinedAt: Date.now() };
+      const ref = fb.doc(db, "apps", CONFIG.appId, "members", user.uid);
+      // Editors at once when the owner chose so (the rules refuse it otherwise, then as a viewer).
+      await fb.setDoc(ref, { ...fields, role: "editor" })
+        .catch(e => { if (!String(e.code).includes("permission-denied")) throw e; return fb.setDoc(ref, fields); });
     }
   }
 
@@ -264,7 +268,7 @@ export async function runStandalone(CONFIG, ICON) {
       // The owner's security settings (My apps → Security): password check, lock, working offline.
       const security = { strongPasswords: true, lock: true, lockAfterMinutes: 2, offline: true, ...(data.security || {}) };
       try { localStorage.setItem("waraqa-sec:" + CONFIG.appId, JSON.stringify(security)); } catch (e) {}
-      if (unlockedUid !== user.uid) {
+      if (unlockedUid !== user.uid && !user.isAnonymous) {
         await securityGate({
           uid: user.uid, email: user.email, name: user.displayName, el: stage, t, lang,
           checkPassword: security.strongPasswords, lock: security.lock, lockAfterMs: security.lockAfterMinutes * 60000,
@@ -278,21 +282,37 @@ export async function runStandalone(CONFIG, ICON) {
       const store = cloudStore(CONFIG.appId, data.headers || [], "", security.offline);
       const storeFor = id => { const f = (latest.files || []).find(x => x.id === id); return f ? cloudStore(CONFIG.appId, f.link.headers || [], id, security.offline) : null; };
       // The owner and members the owner made editors may change records; other members only look.
-      const canEdit = data.ownerUid === user.uid ||
-        (await fb.getDoc(fb.doc(db, "apps", CONFIG.appId, "members", user.uid))).data()?.role === "editor";
-      const requestAccess = () => fb.setDoc(fb.doc(db, "apps", CONFIG.appId, "requests", user.uid), { email: user.email || "", name: (user.displayName || "").trim(), at: Date.now() });
+      const owner = data.ownerUid === user.uid;
+      const editor = owner || (await fb.getDoc(fb.doc(db, "apps", CONFIG.appId, "members", user.uid))).data()?.role === "editor";
+      const canEdit = editor;
+      // The owner's choices: who deletes, who exports, whether viewers may ask for rights.
+      const canDelete = owner || (editor && security.whoDeletes !== "owner");
+      const who = security.whoExports || "everyone";
+      const canExport = owner || who === "everyone" || (who === "editors" && editor);
+      const requestAccess = security.allowRequests === false ? null : () => fb.setDoc(fb.doc(db, "apps", CONFIG.appId, "requests", user.uid), { email: user.email || "", name: (user.displayName || "").trim(), at: Date.now() });
       setMenu([
         shareItem,
-        [t("تصدير البيانات إلى Excel", "Export data to Excel"), () => exportExcel(store)],
-        [t("تسجيل الخروج", "Sign out"), () => fb.signOut(fb.auth)],
-      ]);
-      runApp(stage, latest, store, { lang, t, toast, confirm: confirmBox, errorText, canEdit, requestAccess, storeFor,
+        canExport ? [t("تصدير البيانات إلى Excel", "Export data to Excel"), () => exportExcel(store)] : null,
+        [user.isAnonymous ? t("خروج الضيف", "Leave as guest") : t("تسجيل الخروج", "Sign out"), () => { guestLeft = true; fb.signOut(fb.auth); }],
+      ].filter(Boolean));
+      runApp(stage, latest, store, { lang, t, toast, confirm: confirmBox, errorText, canEdit, canDelete, canExport, requestAccess, storeFor,
         user: { uid: user.uid, name: (user.displayName || pendingName || "").trim(), email: user.email || "" }, onScreen: screen => { document.body.style.background = bg(screen); } });
     } catch (e) {
-      stage.replaceChildren(node("div", { class: "center" }, node("p", {}, errorText(e)),
-        node("button", { class: "lnk", onclick: () => fb.signOut(fb.auth) }, t("تسجيل الخروج", "Sign out"))));
+      // Paused, or no longer open to guests: say so plainly.
+      const info = await publicInfo();
+      const text = info?.paused ? (info.pausedMessage || t("التطبيق متوقف مؤقتًا من صاحبه.", "The app is paused by its owner."))
+        : user.isAnonymous && !info?.guests ? t("صاحب التطبيق أوقف الدخول بدون حساب. سجّل دخولك بحسابك.", "The owner no longer allows guests. Sign in with your account.")
+        : errorText(e);
+      stage.replaceChildren(node("div", { class: "center" }, node("p", {}, text),
+        node("button", { class: "lnk", onclick: () => { guestLeft = true; fb.signOut(fb.auth); } }, t("تسجيل الخروج", "Sign out"))));
     }
   }
+
+  /** What anyone may know before signing in: guests allowed, paused. */
+  async function publicInfo() {
+    try { return (await fb.getDoc(fb.doc(db, "publicApps", CONFIG.appId))).data() || null; } catch (e) { return null; }
+  }
+  let guestLeft = false; // a guest who left sees the sign-in page instead of entering again
 
   function loginView() {
     setMenu([]);
@@ -364,8 +384,15 @@ export async function runStandalone(CONFIG, ICON) {
       input, save, msg));
   }
 
-  fb.onAuthStateChanged(fb.auth, user => {
-    if (!user) return loginView();
+  fb.onAuthStateChanged(fb.auth, async user => {
+    if (!user) {
+      // Apps open to guests skip the sign-in page: a guest account, then the first name.
+      const info = guestLeft ? null : await publicInfo();
+      if (info?.guests) {
+        try { await fb.signInAnonymously(fb.auth); return; } catch (e) { /* guests not enabled in Firebase: sign in instead */ }
+      }
+      return loginView();
+    }
     if (pendingName) return; // the new account's name is being saved, then it opens
     (user.displayName || "").trim() ? openShared(user) : nameView(user);
   });

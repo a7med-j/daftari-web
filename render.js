@@ -1362,6 +1362,9 @@ export function runScreen(root, project, screen, store, opts) {
     if (action === "clear") return clearForm();
     if (action === "openScreen") return opts.openScreen ? opts.openScreen(target) : null;
     if (action === "back") return opts.back ? opts.back() : null;
+    // The app owner's choices: who exports files, who deletes records.
+    if (opts.canExport === false && ["pdfRecord", "pdfTable", "excelTable"].includes(action)) return toast(t("تصدير الملفات متاح لصاحب التطبيق فقط.", "Exporting files is for the app's owner only."));
+    if (action === "deleteRow" && opts.canEdit !== false && opts.canDelete === false) return toast(t("حذف السجلات متاح لصاحب التطبيق فقط.", "Deleting records is for the app's owner only."));
     if (action === "pdfRecord") return recordReport();
     if (action === "pdfTable") return tableReport();
     if (action === "excelTable") return exportTable();
@@ -1467,8 +1470,9 @@ export function runScreen(root, project, screen, store, opts) {
       { dir: lang === "en" ? "ltr" : "rtl", onclick: e => { if (e.target === overlay) close(); } },
       h("div", { background: "#172C24", color: "#fff", borderRadius: "14px", padding: "18px", width: "min(92vw, 400px)", display: "flex", flexDirection: "column", gap: "10px" }, {},
         h("div", { fontWeight: "bold", fontSize: "17px" }, {}, t("غير مصرّح لك بالإضافة أو التعديل", "You can't add or change records")),
-        h("div", { color: "#b9d9c9", fontSize: "14px" }, {}, t("يمكنك البحث والاطلاع على البيانات وتصديرها إلى Excel. لتتمكن من الحفظ والتعديل والحذف اطلب الصلاحية من صاحب التطبيق.",
-          "You can search, view and export the data to Excel. To save, change or delete, ask the app's owner for access.")),
+        h("div", { color: "#b9d9c9", fontSize: "14px" }, {}, opts.requestAccess
+          ? t("يمكنك البحث والاطلاع على البيانات. لتتمكن من الحفظ والتعديل اطلب الصلاحية من صاحب التطبيق.", "You can search and view the data. To save or change records, ask the app's owner for access.")
+          : t("يمكنك البحث والاطلاع على البيانات فقط.", "You can only search and view the data.")),
         opts.requestAccess ? send : null,
         h("button", { background: "none", border: "0", color: "#b9d9c9", fontSize: "15px", cursor: "pointer" }, { onclick: close }, t("إغلاق", "Close"))));
     document.body.append(overlay);
