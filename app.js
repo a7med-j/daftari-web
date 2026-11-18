@@ -92,11 +92,11 @@ const readRows = raw => (Array.isArray(raw) ? raw : []).map(m => ({ ...(m || {})
 /** Who adds a record (kept with it, so the owner can count each member's records). */
 const authorOf = user => ({ by: user?.uid || "", byName: (user?.displayName || "").trim() || user?.email || "", at: String(Date.now()) });
 
-function cloudStore(appId, headers, fileId = "") {
+function cloudStore(appId, headers, fileId = "", offline = true) {
   // Extra files of the project keep their records under tables/{fileId}.
   const col = fileId ? collection(db, "apps", appId, "tables", fileId, "chunks") : collection(db, "apps", appId, "chunks");
   const photoCache = new Map();
-  const table = offlineTable({ db, doc, getDocs, getDocsFromServer, runTransaction, serverTimestamp }, col, headers, () => authorOf(auth.currentUser));
+  const table = offlineTable({ db, doc, getDocs, getDocsFromServer, runTransaction, serverTimestamp }, col, headers, () => authorOf(auth.currentUser), offline);
   return Object.assign(table, {
     // Photos: one compressed JPEG per document, shown from a small in-memory cache.
     async savePhoto(name, jpeg) {
@@ -240,13 +240,24 @@ async function appView(user, appId) {
       const data = snap.data();
       const project = JSON.parse(data.json);
       document.title = project.name;
+      // The owner's security settings (My apps → Security): lock and working offline.
+      const security = { strongPasswords: true, lock: true, lockAfterMinutes: 2, offline: true, ...(data.security || {}) };
+      if (security.lock && lockedApps.get(appId) !== user.uid) {
+        await securityGate({
+          uid: user.uid, email: user.email, name: user.displayName, el: stage, t, lang, checkPassword: false,
+          lockAfterMs: security.lockAfterMinutes * 60000,
+          verify: pw => reauthenticateWithCredential(user, EmailAuthProvider.credential(user.email, pw)),
+          change: pw => updatePassword(user, pw), signOut: () => signOut(auth),
+        });
+        lockedApps.set(appId, user.uid);
+      }
       // "Add to home screen" now opens this app directly.
       useAppManifest(project.name, location.pathname + "?app=" + encodeURIComponent(appId), project.icon || "icon-512.png");
       // The owner and members the owner made editors may change records; other members only look.
       const canEdit = data.ownerUid === user.uid || (await getDoc(doc(db, "apps", appId, "members", user.uid))).data()?.role === "editor";
       const requestAccess = () => setDoc(doc(db, "apps", appId, "requests", user.uid), { email: user.email || "", name: (user.displayName || "").trim(), at: Date.now() });
-      const storeFor = id => { const f = (project.files || []).find(x => x.id === id); return f ? cloudStore(appId, f.link.headers || [], id) : null; };
-      const app = runApp(stage, project, cloudStore(appId, data.headers || []), {
+      const storeFor = id => { const f = (project.files || []).find(x => x.id === id); return f ? cloudStore(appId, f.link.headers || [], id, security.offline) : null; };
+      const app = runApp(stage, project, cloudStore(appId, data.headers || [], "", security.offline), {
         storeFor,
         user: { uid: user.uid, name: (user.displayName || "").trim(), email: user.email || "" },
         lang, t, toast, confirm: confirmBox, errorText, canEdit, requestAccess,
@@ -290,6 +301,7 @@ function nameView(user) {
 
 let currentUser = null;
 let unlockedUid = null;
+const lockedApps = new Map(); // shared apps already unlocked in this page
 async function route() {
   if (cleanup) { cleanup(); cleanup = null; }
   const user = currentUser;
@@ -309,6 +321,7 @@ async function route() {
       verify: pw => reauthenticateWithCredential(user, EmailAuthProvider.credential(user.email, pw)),
       change: pw => updatePassword(user, pw),
       signOut: () => signOut(auth),
+      lock: false, // Waraqa's own pages don't lock; each shared app follows its owner's settings
     });
     if (currentUser !== user) return;
     unlockedUid = user.uid;

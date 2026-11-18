@@ -458,6 +458,8 @@ export function forgetSecurity(uid) {
  */
 export async function securityGate(ui) {
   const { uid, el, t, verify, change, signOut } = ui;
+  // The app owner's choices (My apps → Security): the password check, the lock and its delay.
+  const checkPassword = ui.checkPassword !== false, useLock = ui.lock !== false, lockAfterMs = ui.lockAfterMs || 2 * 60 * 1000;
   const box = (...kids) => {
     const card = h("div", { maxWidth: "380px", margin: "40px auto", padding: "20px", borderRadius: "16px", background: "#172C24", color: "#fff", display: "flex", flexDirection: "column", gap: "10px" }, { dir: ui.lang === "en" ? "ltr" : "rtl" }, ...kids);
     el.replaceChildren(card);
@@ -468,7 +470,7 @@ export async function securityGate(ui) {
   const note = (text, color = "#9FB5AA") => h("p", { margin: "0", fontSize: "13px", color }, {}, text);
 
   // 1. The security update, once per browser, when online (offline it waits for the next time).
-  if (!store.get("waraqa-pw-ok:" + uid) && navigator.onLine) {
+  if (checkPassword && !store.get("waraqa-pw-ok:" + uid) && navigator.onLine) {
     await new Promise(done => {
       const current = input(t("كلمة المرور الحالية", "Current password"));
       const fresh = input(t("كلمة المرور الجديدة", "New password")), again = input(t("تأكيد كلمة المرور الجديدة", "Confirm the new password"));
@@ -540,19 +542,20 @@ export async function securityGate(ui) {
       ...(bio ? [bio, note(t("أو بكلمة مرور الحساب:", "Or with the account password:"))] : []), pass, msg, open, out);
     card.ownerDocument.defaultView?.setTimeout(() => (bio ? useKey() : pass.focus()), 50);
   });
+  if (!useLock) return;
   await unlockOnce();
 
-  // Locks again after more than two minutes in the background (the app stays underneath).
+  // Locks again after some minutes in the background (the app stays underneath).
   if (!ui.watching) {
     ui.watching = true;
     let hiddenAt = 0;
     document.addEventListener("visibilitychange", async () => {
       if (document.hidden) { hiddenAt = Date.now(); return; }
-      if (!hiddenAt || Date.now() - hiddenAt < 2 * 60 * 1000) return;
+      if (!hiddenAt || Date.now() - hiddenAt < lockAfterMs) return;
       hiddenAt = 0;
       const cover = h("div", { position: "fixed", inset: "0", background: "#10251F", zIndex: "100", overflow: "auto" });
       document.body.append(cover);
-      await securityGate({ ...ui, el: cover, watching: true });
+      await securityGate({ ...ui, el: cover, watching: true, checkPassword: false });
       cover.remove();
     });
   }
@@ -580,7 +583,7 @@ export const withValues = (cells, values) => {
  * A shared table's records (fs: the Firestore functions in use). Without a connection a change is
  * kept in this browser, shown at once, and uploaded in order when the connection comes back.
  */
-export function offlineTable(fs, col, headers, author) {
+export function offlineTable(fs, col, headers, author, allowOffline = true) {
   const CHUNK = 200;
   const chunkId = i => "c" + String(i).padStart(5, "0");
   const chunkIndex = id => (/^c\d+$/.test(id) ? Number(id.slice(1)) : null);
@@ -656,6 +659,7 @@ export function offlineTable(fs, col, headers, author) {
         await appendIn({ ...extra, id, c: cells });
       } catch (e) {
         if (!isOffline(e)) throw e;
+        if (!allowOffline) throw Object.assign(new Error("offline"), { code: "unavailable" });
         keep({ kind: "add", id, cells, extra });
       }
       const offline = lastOffline;
@@ -676,6 +680,7 @@ export function offlineTable(fs, col, headers, author) {
       await rewrite(target.id, cells => (kind === "delete" ? null : withValues(cells, values)));
     } catch (e) {
       if (!isOffline(e)) throw e;
+      if (!allowOffline) throw Object.assign(new Error("offline"), { code: "unavailable" });
       keep({ kind, id: target.id, values });
     }
     snapshot = kind === "delete" ? snapshot.filter(r => r.id !== target.id) : snapshot.map(r => (r.id === target.id ? { ...r, c: withValues(r.c, values) } : r));

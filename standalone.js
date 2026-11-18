@@ -221,12 +221,12 @@ export async function runStandalone(CONFIG, ICON) {
   // Who adds a record (kept with it, so the owner can count each member's records).
   const authorOf = user => ({ by: user?.uid || "", byName: (user?.displayName || "").trim() || user?.email || "", at: String(Date.now()) });
 
-  function cloudStore(appId, headers, fileId = "") {
+  function cloudStore(appId, headers, fileId = "", offline = true) {
     const col = fileId ? fb.collection(db, "apps", appId, "tables", fileId, "chunks") : fb.collection(db, "apps", appId, "chunks");
     const photoCache = new Map();
     // Works offline too: changes wait in this browser and go up when the connection is back.
     const table = offlineTable({ db, doc: fb.doc, getDocs: fb.getDocs, getDocsFromServer: fb.getDocsFromServer, runTransaction: fb.runTransaction, serverTimestamp: fb.serverTimestamp },
-      col, headers, () => authorOf(fb.auth.currentUser));
+      col, headers, () => authorOf(fb.auth.currentUser), offline);
     return Object.assign(table, {
       async savePhoto(name, jpeg) {
         await fb.setDoc(fb.doc(db, "apps", appId, "photos", name), { data: fb.Bytes.fromUint8Array(jpeg), createdAt: fb.serverTimestamp() });
@@ -253,17 +253,6 @@ export async function runStandalone(CONFIG, ICON) {
 
   let unlockedUid = null;
   async function openShared(user) {
-    // A one-time password check (weak ones replaced), then the lock: fingerprint/face/PIN or the password.
-    if (unlockedUid !== user.uid) {
-      await securityGate({
-        uid: user.uid, email: user.email, name: user.displayName, el: stage, t, lang,
-        verify: pw => fb.reauthenticateWithCredential(user, fb.EmailAuthProvider.credential(user.email, pw)),
-        change: pw => fb.updatePassword(user, pw),
-        signOut: () => fb.signOut(fb.auth),
-      });
-      if (fb.auth.currentUser !== user) return;
-      unlockedUid = user.uid;
-    }
     stage.replaceChildren(node("div", { class: "center" }, node("p", { class: "muted" }, t("جارٍ الفتح…", "Opening…"))));
     try {
       let snap;
@@ -272,8 +261,22 @@ export async function runStandalone(CONFIG, ICON) {
       if (!snap.exists()) throw fail("not-found-code");
       const data = snap.data();
       const latest = JSON.parse(data.json); // the owner's latest published design
-      const store = cloudStore(CONFIG.appId, data.headers || []);
-      const storeFor = id => { const f = (latest.files || []).find(x => x.id === id); return f ? cloudStore(CONFIG.appId, f.link.headers || [], id) : null; };
+      // The owner's security settings (My apps → Security): password check, lock, working offline.
+      const security = { strongPasswords: true, lock: true, lockAfterMinutes: 2, offline: true, ...(data.security || {}) };
+      try { localStorage.setItem("waraqa-sec:" + CONFIG.appId, JSON.stringify(security)); } catch (e) {}
+      if (unlockedUid !== user.uid) {
+        await securityGate({
+          uid: user.uid, email: user.email, name: user.displayName, el: stage, t, lang,
+          checkPassword: security.strongPasswords, lock: security.lock, lockAfterMs: security.lockAfterMinutes * 60000,
+          verify: pw => fb.reauthenticateWithCredential(user, fb.EmailAuthProvider.credential(user.email, pw)),
+          change: pw => fb.updatePassword(user, pw),
+          signOut: () => fb.signOut(fb.auth),
+        });
+        if (fb.auth.currentUser !== user) return;
+        unlockedUid = user.uid;
+      }
+      const store = cloudStore(CONFIG.appId, data.headers || [], "", security.offline);
+      const storeFor = id => { const f = (latest.files || []).find(x => x.id === id); return f ? cloudStore(CONFIG.appId, f.link.headers || [], id, security.offline) : null; };
       // The owner and members the owner made editors may change records; other members only look.
       const canEdit = data.ownerUid === user.uid ||
         (await fb.getDoc(fb.doc(db, "apps", CONFIG.appId, "members", user.uid))).data()?.role === "editor";
@@ -313,7 +316,8 @@ export async function runStandalone(CONFIG, ICON) {
     toggle.onclick = () => { signUp = !signUp; forgot.hidden = signUp; firstName.hidden = !signUp; paint(); };
     go.onclick = async () => {
       if (signUp && !firstName.value.trim()) { msg.textContent = t("اكتب اسمك الأول.", "Enter your first name."); return; }
-      if (signUp && !isStrongPassword(pass.value)) { msg.textContent = t("كلمة المرور ضعيفة: 8 خانات على الأقل، فيها حروف وأرقام.", "Password too weak: at least 8 characters, with letters and digits."); return; }
+      const strongRule = (() => { try { return JSON.parse(localStorage.getItem("waraqa-sec:" + CONFIG.appId) || "{}").strongPasswords !== false; } catch (e) { return true; } })();
+      if (signUp && strongRule && !isStrongPassword(pass.value)) { msg.textContent = t("كلمة المرور ضعيفة: 8 خانات على الأقل، فيها حروف وأرقام.", "Password too weak: at least 8 characters, with letters and digits."); return; }
       go.disabled = true; msg.textContent = "";
       try {
         if (signUp) {
