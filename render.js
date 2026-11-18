@@ -551,7 +551,7 @@ export async function securityGate(ui) {
           store.set("waraqa-key:" + uid, b64(cred.rawId));
         }
         done();
-      } catch (e) { msg.textContent = t("لم يتم التحقق. حاول مرة أخرى أو استخدم كلمة المرور.", "Not verified. Try again or use the password."); }
+      } catch (e) { msg.textContent = t("لم يتم التحقق. اضغط الزر للمحاولة مرة أخرى.", "Not verified. Tap the button to try again."); }
     };
     if (bio) bio.onclick = useKey;
     open.onclick = async () => {
@@ -570,9 +570,15 @@ export async function securityGate(ui) {
     };
     const out = button(t("تسجيل الخروج", "Sign out"), false);
     out.onclick = () => signOut();
+    // With the phone's lock set up, the password stays hidden behind a small link (if the lock fails).
+    const withPassword = h("div", { display: "flex", flexDirection: "column", gap: "10px" }, {}, pass, open);
+    const showPassword = button(t("استخدام كلمة مرور الحساب", "Use the account password"), false);
+    showPassword.style.fontSize = "13px";
+    showPassword.onclick = () => { withPassword.style.display = "flex"; showPassword.remove(); pass.focus(); };
+    if (bio) withPassword.style.display = "none";
     const card = box(h("div", { fontSize: "40px", textAlign: "center" }, {}, "🔒"), h("h3", { margin: "0", textAlign: "center" }, {}, t("التطبيق مقفل", "The app is locked")),
-      ...(bio ? [bio, note(t("أو بكلمة مرور الحساب:", "Or with the account password:"))] : []), pass, msg, open, out);
-    if (!deviceLock) card.insertBefore(note(t("هذا المتصفح لا يدعم الفتح بقفل الجوال، استخدم Chrome وتأكد أن قفل الشاشة مفعّل.", "This browser can't use the phone's lock; use Chrome with a screen lock set."), "#FFC857"), pass);
+      ...(bio ? [bio, showPassword] : []), withPassword, msg, out);
+    if (!deviceLock) card.insertBefore(note(t("هذا المتصفح لا يدعم الفتح بقفل الجوال؛ تأكد أن قفل الشاشة مفعّل.", "This browser can't use the phone's lock; make sure a screen lock is set."), "#FFC857"), withPassword);
     card.ownerDocument.defaultView?.setTimeout(() => (keyId && bio ? useKey() : bio ? null : pass.focus()), 50);
   });
   if (!useLock) return;
