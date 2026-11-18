@@ -49,6 +49,8 @@ const id = new URLSearchParams(location.search).get("id");
 const value = v => v == null ? null : "stringValue" in v ? v.stringValue : "arrayValue" in v ? (v.arrayValue.values || []).map(value) : null;
 // Pages kept in this browser, so the app also opens without a connection.
 if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js").catch(() => {});
+// Asks the browser to keep this site's data (sign-in, saved records) even when space runs low.
+navigator.storage?.persist?.().catch(() => {});
 try {
   if (!id || !/^[\w-]{1,80}$/.test(id)) throw new Error("bad id");
   const url = `https://firestore.googleapis.com/v1/projects/${firebaseConfig.projectId}/databases/(default)/documents/webApps/${id}?key=${firebaseConfig.apiKey}`;

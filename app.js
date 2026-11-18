@@ -15,6 +15,8 @@ import { runApp, useAppManifest, offlineTable } from "./render.js";
 
 // Pages kept in this browser, so the site also opens without a connection.
 if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js").catch(() => {});
+// Asks the browser to keep this site's data (sign-in, saved records) even when space runs low.
+navigator.storage?.persist?.().catch(() => {});
 
 const fb = initializeApp(firebaseConfig);
 const auth = getAuth(fb);
