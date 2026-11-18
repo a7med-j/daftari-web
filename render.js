@@ -421,6 +421,143 @@ export async function compressPhoto(file, maxSide = 1280, maxBytes = 700000) {
   return new Uint8Array(await blob.arrayBuffer());
 }
 
+// ---- Account security on the web (same rules as Android's PasswordRules and app lock) ----
+
+/** Account passwords: at least 8 characters with letters and digits. */
+export const isStrongPassword = p => String(p || "").length >= 8 && /\p{L}/u.test(p) && /\p{Nd}/u.test(p);
+
+const b64 = buf => btoa(String.fromCharCode(...new Uint8Array(buf)));
+const unb64 = s => Uint8Array.from(atob(s), c => c.charCodeAt(0));
+async function passwordHash(uid, password) {
+  const key = await crypto.subtle.importKey("raw", new TextEncoder().encode(password), "PBKDF2", false, ["deriveBits"]);
+  const bits = await crypto.subtle.deriveBits({ name: "PBKDF2", salt: new TextEncoder().encode("waraqa:" + uid), iterations: 150000, hash: "SHA-256" }, key, 256);
+  return b64(bits);
+}
+const store = {
+  get: k => { try { return localStorage.getItem(k); } catch (e) { return null; } },
+  set: (k, v) => { try { v == null ? localStorage.removeItem(k) : localStorage.setItem(k, v); } catch (e) {} },
+};
+
+/**
+ * Remembers a password the user just typed (sign-in or sign-up), so this browser can open the app
+ * with it offline; a strong one also passes the one-time security check.
+ */
+export async function rememberPassword(uid, password) {
+  if (!uid || !password || !crypto?.subtle) return;
+  store.set("waraqa-pw:" + uid, await passwordHash(uid, password));
+  store.set("waraqa-pw-ok:" + uid, isStrongPassword(password) ? "1" : null);
+}
+export function forgetSecurity(uid) {
+  for (const k of ["waraqa-pw:", "waraqa-pw-ok:", "waraqa-key:"]) store.set(k + uid, null);
+}
+
+/**
+ * Before showing an account's data: a one-time check of the password (a weak one is replaced),
+ * then the lock (fingerprint/face/PIN through the browser, or the password, also offline).
+ * Resolves when the app may show; [ui] gives t, the container, and the account's functions.
+ */
+export async function securityGate(ui) {
+  const { uid, el, t, verify, change, signOut } = ui;
+  const box = (...kids) => {
+    const card = h("div", { maxWidth: "380px", margin: "40px auto", padding: "20px", borderRadius: "16px", background: "#172C24", color: "#fff", display: "flex", flexDirection: "column", gap: "10px" }, { dir: ui.lang === "en" ? "ltr" : "rtl" }, ...kids);
+    el.replaceChildren(card);
+    return card;
+  };
+  const input = ph => h("input", { padding: "12px", borderRadius: "10px", border: "1px solid #2E4A3E", background: "#0E1E19", color: "#fff", fontSize: "15px" }, { type: "password", placeholder: ph });
+  const button = (text, primary = true) => h("button", { padding: "12px", borderRadius: "10px", border: "0", background: primary ? "#20B879" : "transparent", color: primary ? "#fff" : "#9FB5AA", fontSize: "15px", cursor: "pointer" }, {}, text);
+  const note = (text, color = "#9FB5AA") => h("p", { margin: "0", fontSize: "13px", color }, {}, text);
+
+  // 1. The security update, once per browser, when online (offline it waits for the next time).
+  if (!store.get("waraqa-pw-ok:" + uid) && navigator.onLine) {
+    await new Promise(done => {
+      const current = input(t("كلمة المرور الحالية", "Current password"));
+      const fresh = input(t("كلمة المرور الجديدة", "New password")), again = input(t("تأكيد كلمة المرور الجديدة", "Confirm the new password"));
+      const weakNote = note(t("كلمة مرورك ضعيفة. اختر كلمة جديدة: 8 خانات على الأقل، فيها حروف وأرقام.", "Your password is weak. Choose a new one: at least 8 characters, with letters and digits."), "#FF8A80");
+      const msg = note("", "#FF8A80"), go = button(t("متابعة", "Continue")), out = button(t("تسجيل الخروج", "Sign out"), false);
+      const extra = [weakNote, fresh, again];
+      extra.forEach(x => (x.style.display = "none"));
+      current.oninput = () => extra.forEach(x => (x.style.display = current.value && !isStrongPassword(current.value) ? "" : "none"));
+      out.onclick = () => signOut();
+      go.onclick = async () => {
+        msg.textContent = "";
+        const weak = !isStrongPassword(current.value);
+        if (weak && !isStrongPassword(fresh.value)) return (msg.textContent = t("الكلمة الجديدة ضعيفة: 8 خانات على الأقل، فيها حروف وأرقام.", "The new password is weak: at least 8 characters, with letters and digits."));
+        if (weak && fresh.value !== again.value) return (msg.textContent = t("كلمتا المرور الجديدتان غير متطابقتين.", "The new passwords do not match."));
+        go.disabled = true;
+        try {
+          await verify(current.value);
+          if (weak) await change(fresh.value);
+          await rememberPassword(uid, weak ? fresh.value : current.value);
+          done();
+        } catch (e) {
+          msg.textContent = /wrong-password|invalid-credential|invalid-login/.test(String(e?.code)) ? t("كلمة المرور الحالية غير صحيحة.", "The current password is wrong.")
+            : /network/.test(String(e?.code)) ? t("يحتاج اتصالًا بالإنترنت.", "This needs a connection.") : String(e?.message || e);
+          go.disabled = false;
+        }
+      };
+      box(h("h3", { margin: "0" }, {}, t("تحديث الأمان", "Security update")), note(t("أدخل كلمة مرورك الحالية للتأكد من قوتها.", "Enter your current password to check that it is strong.")), current, ...extra, msg, go, out);
+    });
+  }
+
+  // 2. The lock: on opening, and when back after more than two minutes away.
+  const unlockOnce = () => new Promise(done => {
+    const keyId = store.get("waraqa-key:" + uid), hash = store.get("waraqa-pw:" + uid);
+    if (!keyId && !hash) return done(); // nothing known on this browser yet: opens (the check above sets it)
+    const pass = input(t("كلمة مرور الحساب", "Account password"));
+    const msg = note("", "#FF8A80"), open = button(t("فتح", "Open"));
+    const bio = keyId ? button(t("فتح بالبصمة أو رمز الجوال", "Unlock with fingerprint or PIN")) : null;
+    const useKey = async () => {
+      try {
+        await navigator.credentials.get({ publicKey: { challenge: crypto.getRandomValues(new Uint8Array(32)), allowCredentials: [{ type: "public-key", id: unb64(keyId) }], userVerification: "required", timeout: 60000 } });
+        done();
+      } catch (e) { msg.textContent = t("لم يتم التحقق. حاول مرة أخرى أو استخدم كلمة المرور.", "Not verified. Try again or use the password."); }
+    };
+    if (bio) bio.onclick = useKey;
+    open.onclick = async () => {
+      msg.textContent = "";
+      try {
+        const ok = hash ? (await passwordHash(uid, pass.value)) === hash : (await verify(pass.value), true);
+        if (!ok) return (msg.textContent = t("كلمة المرور غير صحيحة.", "Wrong password."));
+        await rememberPassword(uid, pass.value);
+        // Offer the phone's fingerprint/face for next time.
+        if (!store.get("waraqa-key:" + uid) && window.PublicKeyCredential && await PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable?.().catch(() => false)) {
+          try {
+            const cred = await navigator.credentials.create({ publicKey: {
+              challenge: crypto.getRandomValues(new Uint8Array(32)), rp: { name: "Waraqa" },
+              user: { id: new TextEncoder().encode(uid).slice(0, 64), name: ui.email || uid, displayName: ui.name || ui.email || uid },
+              pubKeyCredParams: [{ type: "public-key", alg: -7 }, { type: "public-key", alg: -257 }],
+              authenticatorSelection: { authenticatorAttachment: "platform", userVerification: "required", residentKey: "discouraged" }, timeout: 60000,
+            } });
+            if (cred) store.set("waraqa-key:" + uid, b64(cred.rawId));
+          } catch (e) {}
+        }
+        done();
+      } catch (e) { msg.textContent = t("كلمة المرور غير صحيحة.", "Wrong password."); }
+    };
+    const out = button(t("تسجيل الخروج", "Sign out"), false);
+    out.onclick = () => signOut();
+    const card = box(h("div", { fontSize: "40px", textAlign: "center" }, {}, "🔒"), h("h3", { margin: "0", textAlign: "center" }, {}, t("التطبيق مقفل", "The app is locked")),
+      ...(bio ? [bio, note(t("أو بكلمة مرور الحساب:", "Or with the account password:"))] : []), pass, msg, open, out);
+    card.ownerDocument.defaultView?.setTimeout(() => (bio ? useKey() : pass.focus()), 50);
+  });
+  await unlockOnce();
+
+  // Locks again after more than two minutes in the background (the app stays underneath).
+  if (!ui.watching) {
+    ui.watching = true;
+    let hiddenAt = 0;
+    document.addEventListener("visibilitychange", async () => {
+      if (document.hidden) { hiddenAt = Date.now(); return; }
+      if (!hiddenAt || Date.now() - hiddenAt < 2 * 60 * 1000) return;
+      hiddenAt = 0;
+      const cover = h("div", { position: "fixed", inset: "0", background: "#10251F", zIndex: "100", overflow: "auto" });
+      document.body.append(cover);
+      await securityGate({ ...ui, el: cover, watching: true });
+      cover.remove();
+    });
+  }
+}
+
 // ---- Shared tables that keep working offline (same layout and rules as Android's CloudRowStore) ----
 
 /** Waiting changes applied to the stored records: new ones at the end, changes and removals in place (see OfflineOps). */

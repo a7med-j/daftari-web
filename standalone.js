@@ -1,7 +1,7 @@
 // The standalone runner of an exported web app (one app, no Waraqa screens around it): offline with
 // its data in this browser, or signed in to the team's cloud table. Used by app.html (hosted link)
 // and inlined into exported .html files by the Waraqa app (WebExport.kt), so keep it self-contained.
-import { runApp, offlineTable } from "./render.js";
+import { runApp, offlineTable, isStrongPassword, rememberPassword, securityGate } from "./render.js";
 
 // ---- The exported app's shell: runs the one app above, offline in this browser or on the team's cloud table ----
 export async function runStandalone(CONFIG, ICON) {
@@ -251,7 +251,19 @@ export async function runStandalone(CONFIG, ICON) {
     }
   }
 
+  let unlockedUid = null;
   async function openShared(user) {
+    // A one-time password check (weak ones replaced), then the lock: fingerprint/face/PIN or the password.
+    if (unlockedUid !== user.uid) {
+      await securityGate({
+        uid: user.uid, email: user.email, name: user.displayName, el: stage, t, lang,
+        verify: pw => fb.reauthenticateWithCredential(user, fb.EmailAuthProvider.credential(user.email, pw)),
+        change: pw => fb.updatePassword(user, pw),
+        signOut: () => fb.signOut(fb.auth),
+      });
+      if (fb.auth.currentUser !== user) return;
+      unlockedUid = user.uid;
+    }
     stage.replaceChildren(node("div", { class: "center" }, node("p", { class: "muted" }, t("جارٍ الفتح…", "Opening…"))));
     try {
       let snap;
@@ -301,16 +313,24 @@ export async function runStandalone(CONFIG, ICON) {
     toggle.onclick = () => { signUp = !signUp; forgot.hidden = signUp; firstName.hidden = !signUp; paint(); };
     go.onclick = async () => {
       if (signUp && !firstName.value.trim()) { msg.textContent = t("اكتب اسمك الأول.", "Enter your first name."); return; }
+      if (signUp && !isStrongPassword(pass.value)) { msg.textContent = t("كلمة المرور ضعيفة: 8 خانات على الأقل، فيها حروف وأرقام.", "Password too weak: at least 8 characters, with letters and digits."); return; }
       go.disabled = true; msg.textContent = "";
       try {
         if (signUp) {
           pendingName = firstName.value.trim();
           const made = await fb.createUserWithEmailAndPassword(fb.auth, email.value.trim(), pass.value);
           await fb.updateProfile(made.user, { displayName: pendingName });
+          await rememberPassword(made.user.uid, pass.value);
           openShared(made.user);
-        } else await fb.signInWithEmailAndPassword(fb.auth, email.value.trim(), pass.value);
+        } else {
+          pendingName = "\u0000"; // opens after the password is remembered
+          const signed = await fb.signInWithEmailAndPassword(fb.auth, email.value.trim(), pass.value);
+          await rememberPassword(signed.user.uid, pass.value);
+          pendingName = "";
+          (signed.user.displayName || "").trim() ? openShared(signed.user) : nameView(signed.user);
+        }
       }
-      catch (e) { msg.textContent = errorText(e); }
+      catch (e) { pendingName = ""; msg.textContent = errorText(e); }
       go.disabled = false;
     };
     stage.replaceChildren(node("div", { class: "center" },

@@ -4,14 +4,14 @@
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-app.js";
 import {
   getAuth, onAuthStateChanged, signInWithEmailAndPassword, createUserWithEmailAndPassword,
-  sendPasswordResetEmail, signOut, updateProfile,
+  sendPasswordResetEmail, signOut, updateProfile, reauthenticateWithCredential, EmailAuthProvider, updatePassword,
 } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-auth.js";
 import {
   initializeFirestore, persistentLocalCache, persistentMultipleTabManager, doc, getDoc, setDoc, deleteDoc, collection, getDocs, getDocsFromServer,
   query, where, runTransaction, serverTimestamp, Bytes,
 } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore.js";
 import { firebaseConfig } from "./config.js";
-import { runApp, useAppManifest, offlineTable } from "./render.js";
+import { runApp, useAppManifest, offlineTable, isStrongPassword, rememberPassword, securityGate } from "./render.js";
 
 // Pages kept in this browser, so the site also opens without a connection.
 if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js").catch(() => {});
@@ -173,12 +173,19 @@ function loginView() {
     try {
       if (signUp) {
         if (!firstName.value.trim()) return toast(t("اكتب اسمك الأول.", "Enter your first name."));
+        if (!isStrongPassword(pass.value)) return toast(t("كلمة المرور ضعيفة: 8 خانات على الأقل، فيها حروف وأرقام.", "Password too weak: at least 8 characters, with letters and digits."));
         if (pass.value !== confirm.value) return toast(t("كلمتا المرور غير متطابقتين.", "Passwords do not match."));
-        const made = await createUserWithEmailAndPassword(auth, email.value.trim(), pass.value);
+        signingIn = true;
+        const made = await createUserWithEmailAndPassword(auth, email.value.trim(), pass.value).finally(() => { signingIn = false; });
         await updateProfile(made.user, { displayName: firstName.value.trim() });
+        await rememberPassword(made.user.uid, pass.value);
         route();
       } else {
-        await signInWithEmailAndPassword(auth, email.value.trim(), pass.value);
+        signingIn = true; // the page opens once the password is remembered
+        try {
+          const signed = await signInWithEmailAndPassword(auth, email.value.trim(), pass.value);
+          await rememberPassword(signed.user.uid, pass.value);
+        } finally { signingIn = false; route(); }
       }
     } catch (e) { toast(errorText(e)); } finally { submit.disabled = false; }
   };
@@ -282,6 +289,7 @@ function nameView(user) {
 }
 
 let currentUser = null;
+let unlockedUid = null;
 async function route() {
   if (cleanup) { cleanup(); cleanup = null; }
   const user = currentUser;
@@ -294,6 +302,17 @@ async function route() {
     $app.replaceChildren(header(user), nameView(user));
     return;
   }
+  // A one-time password check (weak ones replaced), then the lock: fingerprint/face/PIN or the password.
+  if (unlockedUid !== user.uid) {
+    await securityGate({
+      uid: user.uid, email: user.email, name: user.displayName, el: $app, t, lang,
+      verify: pw => reauthenticateWithCredential(user, EmailAuthProvider.credential(user.email, pw)),
+      change: pw => updatePassword(user, pw),
+      signOut: () => signOut(auth),
+    });
+    if (currentUser !== user) return;
+    unlockedUid = user.uid;
+  }
   if (pendingCode) {
     const code = pendingCode;
     pendingCode = null;
@@ -304,4 +323,5 @@ async function route() {
   else $app.replaceChildren(header(user), await homeView(user));
 }
 
-onAuthStateChanged(auth, user => { currentUser = user; route(); });
+let signingIn = false;
+onAuthStateChanged(auth, user => { currentUser = user; if (!signingIn) route(); });
