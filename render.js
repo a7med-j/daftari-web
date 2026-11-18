@@ -501,6 +501,29 @@ export async function securityGate(ui) {
     });
   }
 
+  /** Asks once to open with the phone's own lock next time; the button gives the browser the tap it needs. */
+  const offerDeviceLock = () => new Promise(done => {
+    const yes = button(t("تفعيل الفتح بقفل الجوال", "Use the phone's lock")), later = button(t("لاحقًا", "Later"), false);
+    const msg = note("", "#FF8A80");
+    yes.onclick = async () => {
+      try {
+        const cred = await navigator.credentials.create({ publicKey: {
+          challenge: crypto.getRandomValues(new Uint8Array(32)), rp: { name: "Waraqa" },
+          user: { id: new TextEncoder().encode(uid).slice(0, 64), name: ui.email || uid, displayName: ui.name || ui.email || uid },
+          pubKeyCredParams: [{ type: "public-key", alg: -7 }, { type: "public-key", alg: -257 }],
+          authenticatorSelection: { authenticatorAttachment: "platform", userVerification: "required", residentKey: "discouraged" }, timeout: 60000,
+        } });
+        if (cred) store.set("waraqa-key:" + uid, b64(cred.rawId));
+        done();
+      } catch (e) { msg.textContent = t("لم يتم التفعيل: ", "Not turned on: ") + (e?.message || e); }
+    };
+    later.onclick = () => done();
+    box(h("div", { fontSize: "40px", textAlign: "center" }, {}, "🔐"),
+      h("h3", { margin: "0", textAlign: "center" }, {}, t("افتح بقفل جوالك", "Open with your phone's lock")),
+      note(t("في المرات القادمة يفتح التطبيق بالبصمة أو الوجه أو رمز الجوال، بدل كلمة مرور الحساب.", "Next time the app opens with your fingerprint, face or phone PIN instead of the account password.")),
+      yes, msg, later);
+  });
+
   // 2. The lock: on opening, and when back after more than two minutes away.
   const unlockOnce = () => new Promise(done => {
     const keyId = store.get("waraqa-key:" + uid), hash = store.get("waraqa-pw:" + uid);
@@ -521,17 +544,10 @@ export async function securityGate(ui) {
         const ok = hash ? (await passwordHash(uid, pass.value)) === hash : (await verify(pass.value), true);
         if (!ok) return (msg.textContent = t("كلمة المرور غير صحيحة.", "Wrong password."));
         await rememberPassword(uid, pass.value);
-        // Offer the phone's fingerprint/face for next time.
-        if (!store.get("waraqa-key:" + uid) && window.PublicKeyCredential && await PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable?.().catch(() => false)) {
-          try {
-            const cred = await navigator.credentials.create({ publicKey: {
-              challenge: crypto.getRandomValues(new Uint8Array(32)), rp: { name: "Waraqa" },
-              user: { id: new TextEncoder().encode(uid).slice(0, 64), name: ui.email || uid, displayName: ui.name || ui.email || uid },
-              pubKeyCredParams: [{ type: "public-key", alg: -7 }, { type: "public-key", alg: -257 }],
-              authenticatorSelection: { authenticatorAttachment: "platform", userVerification: "required", residentKey: "discouraged" }, timeout: 60000,
-            } });
-            if (cred) store.set("waraqa-key:" + uid, b64(cred.rawId));
-          } catch (e) {}
+        // Next time: the phone's own lock (fingerprint, face or PIN) instead of the password.
+        if (!store.get("waraqa-key:" + uid) && window.PublicKeyCredential
+          && await PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable?.().catch(() => false)) {
+          await offerDeviceLock();
         }
         done();
       } catch (e) { msg.textContent = t("كلمة المرور غير صحيحة.", "Wrong password."); }
