@@ -433,7 +433,13 @@ export function watchUpdates(t = (ar, en) => ar) {
     if (e.data?.type !== "waraqa-updated" || shown) return;
     shown = true;
     const typing = document.activeElement && /INPUT|TEXTAREA|SELECT/.test(document.activeElement.tagName);
-    if (Date.now() - openedAt < 8000 && !typing) return location.reload();
+    // Reloads by itself at most once a minute (never in a loop); otherwise the bar below.
+    let last = 0;
+    try { last = +sessionStorage.getItem("waraqa-reloaded") || 0; } catch (err) {}
+    if (Date.now() - openedAt < 8000 && !typing && Date.now() - last > 60000) {
+      try { sessionStorage.setItem("waraqa-reloaded", String(Date.now())); } catch (err) {}
+      return location.reload();
+    }
     const bar = h("div", { position: "fixed", insetInline: "12px", bottom: "12px", zIndex: "200", padding: "12px 14px", borderRadius: "12px", background: "#172C24", color: "#fff", display: "flex", alignItems: "center", gap: "10px", boxShadow: "0 4px 16px rgba(0,0,0,.3)", fontSize: "14px" }, {},
       h("span", { flex: "1" }, {}, t("يوجد تحديث جديد.", "An update is ready.")));
     const go = h("button", { border: "0", borderRadius: "8px", padding: "8px 14px", background: "#20B879", color: "#fff", cursor: "pointer" }, {}, t("تحديث", "Update"));
