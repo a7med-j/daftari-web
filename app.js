@@ -259,7 +259,7 @@ async function appView(user, appId) {
       const project = JSON.parse(data.json);
       document.title = project.name;
       // The owner's security settings (My apps → Security): lock and working offline.
-      const security = { strongPasswords: true, lock: true, lockAfterMinutes: 2, offline: true, ...(data.security || {}) };
+      const security = { strongPasswords: true, lock: false, lockAfterMinutes: 2, offline: true, ...(data.security || {}) };
       const locks = lockChoice(appId, user.uid, security);
       if ((locks.device || locks.password) && lockedApps.get(appId) !== user.uid) {
         await securityGate({

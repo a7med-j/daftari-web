@@ -480,11 +480,13 @@ const sessionGet = k => { try { return sessionStorage.getItem(k); } catch (e) { 
 const sessionSet = (k, v) => { try { v == null ? sessionStorage.removeItem(k) : sessionStorage.setItem(k, v); } catch (e) {} };
 
 /**
- * Which locks open an app on this browser: those its owner requires (My apps → Security), plus those
- * the member turned on for themselves. Older settings had one "lock" switch: the phone's lock.
+ * Which locks open an app on this browser: the account password when its owner requires it (My apps →
+ * Security), plus those the member turned on for themselves.
  */
 export function lockChoice(appId, uid, security = {}) {
-  const owner = { device: security.lock !== false, password: security.passwordLock === true };
+  // On the web the phone's lock is each member's own choice (off until they turn it on), so signing
+  // in is by email and password only; the owner may still require the account password.
+  const owner = { device: false, password: security.passwordLock === true };
   let mine = {};
   try { mine = JSON.parse(store.get(`waraqa-mylock:${appId}:${uid}`) || "{}"); } catch (e) {}
   return { owner, mine, device: owner.device || !!mine.device, password: owner.password || !!mine.password };

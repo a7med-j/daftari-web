@@ -278,7 +278,7 @@ export async function runStandalone(CONFIG, ICON) {
       const data = snap.data();
       const latest = JSON.parse(data.json); // the owner's latest published design
       // The owner's security settings (My apps → Security): password check, lock, working offline.
-      const security = { strongPasswords: true, lock: true, lockAfterMinutes: 2, offline: true, ...(data.security || {}) };
+      const security = { strongPasswords: true, lock: false, lockAfterMinutes: 2, offline: true, ...(data.security || {}) };
       try { localStorage.setItem("waraqa-sec:" + CONFIG.appId, JSON.stringify(security)); } catch (e) {}
       const locks = lockChoice(CONFIG.appId, user.uid, security);
       if (unlockedUid !== user.uid && !user.isAnonymous) {
