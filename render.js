@@ -1074,6 +1074,131 @@ export function computeFormulas(screen, valueOf) {
   return results;
 }
 
+// ---- Summary tables (see FormLogic.summary) ----
+
+const SUMMARY_FUNCTIONS = {
+  "مجموع": "sum", "المجموع": "sum", sum: "sum", "متوسط": "average", "المتوسط": "average", average: "average",
+  "أكبر": "max", "اكبر": "max", max: "max", "أصغر": "min", "اصغر": "min", min: "min",
+  "آخر": "last", "اخر": "last", last: "last", "أول": "first", "اول": "first", first: "first", "عدد": "count", count: "count",
+};
+
+/** A summary table's columns, one per line: "title = function column" or "function column". */
+export function summaryColumns(spec) {
+  return String(spec || "").split("\n").map(raw => raw.trim()).filter(Boolean).map(line => {
+    const eq = line.indexOf("=");
+    const title = eq > 0 ? line.slice(0, eq).trim() : line;
+    const body = (eq > 0 ? line.slice(eq + 1) : line).trim();
+    const space = body.indexOf(" ");
+    const fn = SUMMARY_FUNCTIONS[normalize(space < 0 ? body : body.slice(0, space))];
+    return fn ? { title: title || body, fn, arg: space < 0 ? "" : body.slice(space + 1).trim() } : null;
+  }).filter(Boolean);
+}
+
+/** One line per value of groupColumn among the rows numbered `numbers` (header line first). */
+export function summary(rows, numbers, groupColumn, columns, total = false, hideZero = false, totalTitle = "الإجمالي") {
+  const head = rows[0] || [];
+  const index = name => { const i = head.findIndex(x => normalize(x) === normalize(name)); return i < 0 ? null : i; };
+  const cell = (n, col) => String((rows[n - 1] || [])[col] ?? "").trim();
+  const valueIn = (c, n) => {
+    const col = index(c.arg);
+    if (col != null) return cell(n, col);
+    if (!c.arg) return "";
+    const v = evaluateFormula(c.arg, name => { const i = index(name); return i == null ? "" : cell(n, i); });
+    return v == null ? "" : formatNumber(v);
+  };
+  const groups = new Map();
+  for (const n of numbers) {
+    const key = cell(n, groupColumn);
+    if (!key) continue;
+    const k = normalize(key);
+    if (!groups.has(k)) groups.set(k, { key, members: [] });
+    groups.get(k).members.push(n);
+  }
+  const compute = (c, members) => {
+    if (c.fn === "count") return String(members.length);
+    const vals = members.map(n => valueIn(c, n)).filter(v => v.trim());
+    const nums = vals.map(numberOf).filter(v => v != null);
+    switch (c.fn) {
+      case "sum": return formatNumber(nums.reduce((a, b) => a + b, 0));
+      case "average": return nums.length ? formatNumber(nums.reduce((a, b) => a + b, 0) / nums.length) : "";
+      default: {
+        if (!vals.length) return "";
+        const high = c.fn === "max" || c.fn === "last";
+        if (nums.length === vals.length) return formatNumber(high ? Math.max(...nums) : Math.min(...nums));
+        const sorted = [...vals].sort();
+        return high ? sorted[sorted.length - 1] : sorted[0];
+      }
+    }
+  };
+  let lines = [...groups.values()].map(g => [g.key, ...columns.map(c => compute(c, g.members))]);
+  if (hideZero && columns.length) lines = lines.filter(l => { const v = numberOf(l[l.length - 1]); return v != null ? v !== 0 : String(l[l.length - 1]).trim() !== ""; });
+  const header = [head[groupColumn] ?? "", ...columns.map(c => c.title)];
+  if (!total) return [header, ...lines];
+  const totals = [totalTitle, ...columns.map((c, i) => (c.fn === "sum" || c.fn === "count") ? formatNumber(lines.reduce((a, l) => a + (numberOf(l[i + 1]) ?? 0), 0)) : "")];
+  return [header, ...lines, totals];
+}
+
+/** A date written with `pattern` ("yyyy/MM" or one with days) moved on by `steps` months, or null. */
+export function addPeriods(value, pattern, steps) {
+  const m = toWestern(value).trim().match(/^(\d{4})\/(\d{1,2})(?:\/(\d{1,2}))?$/);
+  const p = pattern || "yyyy/MM/dd";
+  if (!m || !(p === "yyyy/MM" || p === "yyyy/MM/dd")) return null;
+  const pad = n => String(n).padStart(2, "0");
+  let y = Number(m[1]), mo = Number(m[2]) - 1 + steps;
+  y += Math.floor(mo / 12); mo = ((mo % 12) + 12) % 12;
+  if (p === "yyyy/MM") return `${y}/${pad(mo + 1)}`;
+  const last = new Date(Date.UTC(y, mo + 1, 0)).getUTCDate();
+  return `${y}/${pad(mo + 1)}/${pad(Math.min(Number(m[3] || 1), last))}`;
+}
+
+// ---- Fields added as columns by an "add a field" button (see FormLogic.withAddedFields) ----
+
+const overlapV = (a, b) => Math.max(0, Math.min(a.y + a.height, b.y + b.height) - Math.max(a.y, b.y));
+const overlapH = (a, b) => Math.max(0, Math.min(a.x + a.width, b.x + b.width) - Math.max(a.x, b.x));
+const gapH = (a, b) => (a.x + a.width <= b.x ? b.x - (a.x + a.width) : b.x + b.width <= a.x ? a.x - (b.x + b.width) : 0);
+
+/** The label captioning an input: on the same line (nearest), else just above it. */
+export function labelComponentFor(screen, input) {
+  // Never itself: a label showing a value is captioned by another one.
+  const labels = screen.components.filter(c => c.type === "LABEL" && String(c.text || "").trim() && c.id !== input.id);
+  const same = labels.filter(l => overlapV(l, input) > Math.min(l.height, input.height) / 2).sort((a, b) => gapH(a, input) - gapH(b, input))[0];
+  if (same) return same;
+  return labels.filter(l => l.y + l.height <= input.y + 4 && input.y - (l.y + l.height) <= 48 && overlapH(l, input) > 0)
+    .sort((a, b) => (input.y - (a.y + a.height)) - (input.y - (b.y + b.height)))[0] || null;
+}
+
+export function withAddedFields(screen, headers) {
+  const button = screen.components.find(c => c.type === "BUTTON" && prop(c, "action") === "addField");
+  if (!button) return screen;
+  const bound = bindings(screen, headers);
+  const wanted = prop(button, "templateField");
+  const textFields = bound.filter(([c]) => c.type === "TEXT_FIELD").sort((a, b) => b[0].y - a[0].y || b[0].x - a[0].x);
+  const hit = (wanted && bound.find(([c]) => normalize(c.name) === normalize(wanted))) || textFields[0];
+  if (!hit) return screen;
+  const [template, templateColumn] = hit;
+  const used = new Set(bound.map(([, col]) => col));
+  const extra = headers.map((hd, i) => i).filter(i => i > templateColumn && !used.has(i) && String(headers[i]).trim());
+  if (!extra.length) return screen;
+  const label = labelComponentFor(screen, template);
+  const rowBottom = Math.max(template.y + template.height, label ? label.y + label.height : 0);
+  const rowHeight = rowBottom - Math.min(template.y, label ? label.y : template.y);
+  const above = screen.components.filter(c => INPUT_TYPES.has(c.type) && c.y < template.y - 1 && overlapH(c, template) > 0).sort((a, b) => b.y - a.y)[0];
+  const gap = above ? template.y - above.y : 0;
+  const step = above && gap >= rowHeight ? gap : rowHeight + 8;
+  const names = new Set(screen.components.map(c => normalize(c.name)));
+  const nameLike = c => { const base = c.name.replace(/\d+$/, "") || c.type.toLowerCase(); let n = 1; while (names.has(normalize(base + n))) n++; names.add(normalize(base + n)); return base + n; };
+  const moved = screen.components.map(c => (c.id !== template.id && c.id !== label?.id && c.y >= rowBottom - 0.5 ? { ...c, y: c.y + step * extra.length } : c));
+  const strip = (props, keys) => Object.fromEntries(Object.entries(props || {}).filter(([k]) => !keys.includes(k)));
+  const added = extra.flatMap((col, i) => {
+    const dy = step * (i + 1), title = headers[col];
+    return [
+      label && { ...label, id: `${label.id}~${col}`, name: nameLike(label), text: title, y: label.y + dy, properties: strip(label.properties, ["formula", "stat", "lookupField"]) },
+      { ...template, id: `${template.id}~${col}`, name: nameLike(template), y: template.y + dy, properties: { ...strip(template.properties, ["formula", "lookupField", "autoNumber"]), column: title } },
+    ].filter(Boolean);
+  });
+  return { ...screen, components: [...moved, ...added] };
+}
+
 /** Column index of each input bound to a header, like FormLogic.bindings. */
 export function bindings(screen, headers) {
   const out = [];
@@ -1105,6 +1230,7 @@ export function formatDate(c, date, lang) {
     case "dd/MM/yyyy": return `${day}/${month}/${year}`;
     case "MM/dd/yyyy": return `${month}/${day}/${year}`;
     case "d MMMM yyyy": return `${Number(day)} ${parts.monthName} ${year}`;
+    case "yyyy/MM": return `${year}/${month}`;
     default: return `${year}/${month}/${day}`;
   }
 }
@@ -1205,6 +1331,9 @@ export function runScreen(root, project, screen, store, opts) {
   const otherRows = {};
   let freshOff = []; // stops the updates from the server when this screen closes
   const headers = store ? store.headers : [];
+  // Columns added by an "add a field" button each get a row like the template field's.
+  const designed = screen;
+  screen = withAddedFields(screen, headers);
   const binds = bindings(screen, headers);
   // Typed values are shared by all screens of the app, so they survive moving between screens.
   const values = opts.values || {};
@@ -1223,11 +1352,33 @@ export function runScreen(root, project, screen, store, opts) {
       if (before === undefined ? v !== "" && !(values[id] || "").trim() : before !== v) { values[id] = v; inputs[id]?.(v); }
       lastLooked[id] = v;
     }
-    computed = { ...computeFormulas(screen, c => (c.type === "LABEL" ? c.text : values[c.id] ?? "")), ...labels };
+    // Calculations can use statistics (e.g. profits minus expenses).
+    computed = { ...computeFormulas(screen, c => (c.type === "LABEL" ? (prop(c, "stat") ? statRaw(c) ?? c.text : c.text) : values[c.id] ?? "")), ...labels };
     for (const [id, show] of Object.entries(formulaShown)) show(computed[id] ?? "");
     refreshShownLater();
   };
   let refreshShownLater = () => {};
+  /** A label's statistic as a bare number, or null while its file is read (see statRaw on Android). */
+  function statRaw(c) {
+    const chosen = prop(c, "statFile");
+    const file = chosen === "@main" ? "" : chosen && (project.files || []).some(f => f.id === chosen) ? chosen : fileId;
+    const rows = file === fileId ? state.sheetRows : rowsFor(file);
+    if (!rows || rows.length < 1) return null;
+    const head = rows[0] || [];
+    const colOfName = name => { const i = head.findIndex(x => normalize(x) === normalize(name)); return i < 0 ? null : i; };
+    // The filter's value may come from a field, such as the month a report is for.
+    const source = byName(prop(c, "statFilterField"));
+    const wanted = source ? values[source.id] ?? "" : prop(c, "statFilterValue");
+    let numbers = rowsWhere(rows, prop(c, "statFilterColumn") ? colOfName(prop(c, "statFilterColumn")) : null, wanted);
+    let kind = prop(c, "stat");
+    if (kind === "mine") {
+      // Records added by whoever is signed in (all of them when records keep no author, e.g. on this device only).
+      const authors = (file === fileId ? store : storeOf(file))?.authors?.();
+      if (authors && opts.user) numbers = numbers.filter(n => authors[n - 2] === opts.user.uid);
+      kind = "count";
+    }
+    return statistic(rows, numbers, kind, prop(c, "statColumn") ? colOfName(prop(c, "statColumn")) : null);
+  }
   const state = { currentRow: null, lastCriteria: null, filledSnapshot: null, sheetRows: null, working: false };
   const inputs = {}; // component id -> function(value) updating its element
   const tables = [];
@@ -1281,7 +1432,7 @@ export function runScreen(root, project, screen, store, opts) {
     const s = storeOf(id);
     if (s && !loadingFiles.has(id)) {
       loadingFiles.add(id);
-      const show = rows => { otherRows[id] = rows; tables.forEach(draw => draw()); statLabels.forEach(update => update()); };
+      const show = rows => { otherRows[id] = rows; tables.forEach(draw => draw()); statLabels.forEach(update => update()); recompute(); };
       freshOff.push(s.onFresh?.(show));
       s.rows(true).then(show).catch(e => toast(opts.errorText(e))).finally(() => loadingFiles.delete(id));
     }
@@ -1301,6 +1452,18 @@ export function runScreen(root, project, screen, store, opts) {
     const wanted = source ? toExcel(source) : prop(c, "filterValue");
     let numbers = rowsMatching(rows, column, wanted, prop(c, "filterMatch") === "contains", !!columnField);
     const sort = tableSorts[c.id];
+    // A summary table: one line per value of a column (e.g. per member), from the filtered rows.
+    const group = col(prop(c, "groupBy"));
+    if (group != null) {
+      const lines = summary(rows, numbers, group, summaryColumns(prop(c, "groupValues")), bool(c, "groupTotal"), bool(c, "groupHideZero"), t("الإجمالي", "Total"));
+      const totalLine = bool(c, "groupTotal") ? lines.length : null;
+      let body = lines.map((_, i) => i + 1).slice(1).filter(n => n !== totalLine);
+      if (sort && sort.column >= 0) body = sortRows(lines, body, sort.column, sort.descending);
+      const nums = totalLine ? [...body, totalLine] : body;
+      const cols = lines[0].map((_, i) => i);
+      const lineOf = n => cols.map(i => (lines[n - 1] || [])[i] ?? "");
+      return { fileId: "@summary", rows: lines, columns: cols, numbers: nums, head: lines[0], header: () => lines[0], line: lineOf, shownRows: () => [lines[0], ...nums.map(lineOf)] };
+    }
     if (sort && sort.column >= 0) numbers = sortRows(rows, numbers, sort.column, sort.descending);
     const chosen = tableColumns[c.id] || prop(c, "shownColumns").split(/[,،]/).map(x => x.trim()).filter(Boolean);
     let columns = head.map((_, i) => i).filter(i => !chosen.length || chosen.some(n => normalize(n) === normalize(head[i])));
@@ -1370,6 +1533,7 @@ export function runScreen(root, project, screen, store, opts) {
       }
     }
     redrawFilteredBy(c);
+    if (screen.components.some(o => normalize(prop(o, "statFilterField")) === normalize(c.name) && prop(o, "statFilterField"))) { statLabels.forEach(update => update()); recompute(); }
     // Lists that depend on this one show matching options and drop a choice that no longer fits.
     for (const child of screen.components) {
       if (byName(prop(child, "parentField")) !== c) continue;
@@ -1440,6 +1604,7 @@ export function runScreen(root, project, screen, store, opts) {
       tables.forEach(draw => draw());
       Object.values(optionRefreshers).forEach(redraw => redraw());
       statLabels.forEach(update => update());
+      recompute();
     };
     freshOff.push(store.onFresh?.(show));
     try { show(await store.rows(true)); } catch (e) { toast(opts.errorText(e)); }
@@ -1504,10 +1669,13 @@ export function runScreen(root, project, screen, store, opts) {
     if (action === "openScreen") return opts.openScreen ? opts.openScreen(target) : null;
     if (action === "back") return opts.back ? opts.back() : null;
     // The app owner's choices: who exports files, who deletes records.
-    if (opts.canExport === false && ["pdfRecord", "pdfTable", "excelTable"].includes(action)) return toast(t("تصدير الملفات متاح لصاحب التطبيق فقط.", "Exporting files is for the app's owner only."));
+    if (opts.canExport === false && ["pdfRecord", "pdfTable", "excelTable", "pdfScreen"].includes(action)) return toast(t("تصدير الملفات متاح لصاحب التطبيق فقط.", "Exporting files is for the app's owner only."));
     if (action === "deleteRow" && opts.canEdit !== false && opts.canDelete === false) return toast(t("حذف السجلات متاح لصاحب التطبيق فقط.", "Deleting records is for the app's owner only."));
     if (action === "pdfRecord") return recordReport();
     if (action === "pdfTable") return tableReport();
+    if (action === "pdfScreen") return screenReport();
+    if (action === "addField") return toast(opts.canEdit === false ? t("غير مصرّح لك بالإضافة.", "You can't add.")
+      : t("إضافة الحقول تتم من تطبيق ورقة: يضيفها صاحب التطبيق ثم يعيد النشر.", "Fields are added in the Waraqa app: its owner adds them, then publishes again."));
     if (action === "excelTable") return exportTable();
     if (action === "chooseColumns") {
       const table = mainTable();
@@ -1550,9 +1718,21 @@ export function runScreen(root, project, screen, store, opts) {
           const rows = await store.rows();
           for (const [c, col] of numbered) { const next = nextNumber(rows, col, prop(c, "autoPrefix"), Math.trunc(num(c, "autoDigits"))); setValue(c, next); assigned.push(next); }
         }
-        const row = await store.append(formValues());
+        // Several records at once (e.g. paying 3 months ahead): the date moves on a month each time.
+        const countField = byName(button ? prop(button, "repeatField") : "");
+        const times = Math.min(120, Math.max(1, Math.trunc(countField ? numberOf(values[countField.id]) ?? 1 : 1)));
+        const dateField = byName(button ? prop(button, "repeatDateField") : "");
+        const dateCol = dateField ? binds.find(([b]) => b === dateField)?.[1] : null;
+        const first = formValues();
+        let row = 0;
+        for (let i = 0; i < times; i++) {
+          const record = i === 0 || dateCol == null ? first : { ...first, [dateCol]: addPeriods(first[dateCol] ?? "", prop(dateField, "dateFormat"), i) ?? first[dateCol] };
+          const added = await store.append(record);
+          if (i === 0) row = added;
+        }
         clearForm();
-        saved(t(`تمت إضافة الصف رقم ${row} ✓`, `Row ${row} added ✓`) + (assigned.length ? " — " + assigned.join("، ") : ""));
+        if (times > 1) saved(t(`تمت إضافة ${times} سجلات ✓`, `${times} records added ✓`));
+        else saved(t(`تمت إضافة الصف رقم ${row} ✓`, `Row ${row} added ✓`) + (assigned.length ? " — " + assigned.join("، ") : ""));
       } else if (action === "search") {
         const field = button ? prop(button, "searchField") : "";
         const mode = (button && prop(button, "matchMode")) || "exact";
@@ -1668,11 +1848,48 @@ export function runScreen(root, project, screen, store, opts) {
     }
   }
 
+  /** The whole screen as a report: each value with its caption, each table under the label above it. */
+  async function screenReport() {
+    const w = reportWindow(lang);
+    if (!w) return toast(t("اسمح بالنوافذ المنبثقة لهذا الموقع لعرض التقرير.", "Allow pop-ups for this site to see the report."));
+    const parts = screen.components.filter(c => bool(c, "visible") && isShown(c)).sort((a, b) => a.y - b.y || a.x - b.x);
+    const facts = [];
+    let body = "";
+    const flush = () => { if (facts.length) body += `<table>${facts.join("")}</table><br>`; facts.length = 0; };
+    const fact = (cap, value) => facts.push(`<tr><td class="cap">${esc(cap)}</td><td>${esc(value || "—")}</td></tr>`);
+    for (const c of parts) {
+      if (c.type === "TABLE") {
+        flush();
+        const above = parts.filter(l => l.type === "LABEL" && l.y + l.height <= c.y + 4 && c.y - (l.y + l.height) <= 40 && l.x < c.x + c.width && c.x < l.x + l.width).sort((a, b) => b.y - a.y)[0];
+        let grid;
+        if (prop(c, "dataSource") === "sheet") {
+          const file = tableFileOf(c);
+          if (file !== fileId && !otherRows[file]) { const s = storeOf(file); if (s) otherRows[file] = await s.rows(); }
+          if (file === fileId && !state.sheetRows && store) state.sheetRows = await store.rows();
+          grid = tableView(c)?.shownRows();
+        } else grid = [prop(c, "columns").split(",").map(x => x.trim())];
+        if (!grid) continue;
+        const [head, ...data] = grid;
+        if (above) body += `<h3 style="color:#00838F;margin:14px 0 6px">${esc(above.text)}</h3>`;
+        body += `<table><tr>${head.map(x => `<th>${esc(x)}</th>`).join("")}</tr>` +
+          data.filter(r => r.some(v => String(v).trim())).map((r, i) => `<tr class="${i % 2 ? "s" : ""}">${head.map((_, j) => `<td>${esc(r[j] ?? "")}</td>`).join("")}</tr>`).join("") + "</table><br>";
+      } else if (c.type === "LABEL" && prop(c, "stat")) {
+        const own = String(c.text || "").replaceAll("{}", "").trim().replace(/[:：]$/, "").trim();
+        fact(own || labelComponentFor(screen, c)?.text?.trim() || "", statRaw(c) ?? "");
+      } else if (c.type === "LABEL" && c.id in computed) fact(labelComponentFor(screen, c)?.text?.trim() || "", computed[c.id]);
+      else if (INPUT_TYPES.has(c.type) && !PICTURE_TYPES.has(c.type)) fact(caption(c), toExcel(c));
+    }
+    flush();
+    showReport(w, lang, prop2(screen, "title") || project.name, body);
+  }
+
   // Page size: the project frame, turned for landscape screens.
   const f = project.frame || { width: 360, height: 800 };
   const landscape = (screen.properties || {}).orientation === "landscape";
   const pageW = landscape ? Math.max(f.width, f.height) : Math.min(f.width, f.height);
-  const pageH = landscape ? Math.min(f.width, f.height) : Math.max(f.width, f.height);
+  // Added fields can push the page down: it grows to keep them all (and scrolls).
+  const pageH = Math.max(landscape ? Math.min(f.width, f.height) : Math.max(f.width, f.height),
+    screen === designed ? 0 : Math.max(0, ...screen.components.map(c => c.y + c.height)) + 16);
 
   // Positions are physical (left/top) in both languages, so the page itself is laid out left-to-right.
   const page = h("div", { position: "absolute", left: "0", top: "0", width: pageW + "px", height: pageH + "px", transformOrigin: "top left" }, { dir: "ltr" });
@@ -1717,23 +1934,7 @@ export function runScreen(root, project, screen, store, opts) {
         if (isCalculated(c)) formulaShown[c.id] = v => { text.textContent = v; };
         if (prop(c, "stat")) {
           // The file counted: the screen's own unless another is chosen ("@main" = the main file).
-          const chosen = prop(c, "statFile");
-          const file = chosen === "@main" ? "" : chosen && (project.files || []).some(f => f.id === chosen) ? chosen : fileId;
-          const update = () => {
-            const rows = file === fileId ? state.sheetRows : rowsFor(file);
-            if (!rows || rows.length < 1) { text.textContent = withStatistic(shownText || "", "…"); return; }
-            const head = rows[0] || [];
-            const colOfName = name => { const i = head.findIndex(x => normalize(x) === normalize(name)); return i < 0 ? null : i; };
-            let numbers = rowsWhere(rows, prop(c, "statFilterColumn") ? colOfName(prop(c, "statFilterColumn")) : null, prop(c, "statFilterValue"));
-            let kind = prop(c, "stat");
-            if (kind === "mine") {
-              // Records added by whoever is signed in (all of them when records keep no author, e.g. on this device only).
-              const authors = (file === fileId ? store : storeOf(file))?.authors?.();
-              if (authors && opts.user) numbers = numbers.filter(n => authors[n - 2] === opts.user.uid);
-              kind = "count";
-            }
-            text.textContent = withStatistic(shownText || "", statistic(rows, numbers, kind, prop(c, "statColumn") ? colOfName(prop(c, "statColumn")) : null));
-          };
+          const update = () => { text.textContent = withStatistic(shownText || "", statRaw(c) ?? "…"); };
           statLabels.push(update);
           update();
         }
@@ -1892,11 +2093,12 @@ export function runScreen(root, project, screen, store, opts) {
         show(values[c.id]);
         inputs[c.id] = show;
         const picker = h("input", { position: "absolute", inset: "0", opacity: "0", width: "100%", height: "100%", cursor: "pointer" }, {
-          type: "date", disabled: !enabled,
+          // Month-only dates pick a month where the browser can.
+          type: prop(c, "dateFormat") === "yyyy/MM" && prop(c, "calendar") !== "hijri" ? "month" : "date", disabled: !enabled,
           onchange: e => {
             if (!e.target.value) return;
             const [y, m, d] = e.target.value.split("-").map(Number);
-            setValue(c, formatDate(c, new Date(Date.UTC(y, m - 1, d)), lang));
+            setValue(c, formatDate(c, new Date(Date.UTC(y, m - 1, d || 1)), lang));
           },
         });
         const el = frame({ position: "relative", gap: "6px" });
