@@ -1548,11 +1548,12 @@ export function runScreen(root, project, screen, store, opts) {
   // Back in the row it was in (stores that can't insert add it at the end).
   const putBack = (n, record) => store.insert ? store.insert(n, record) : store.append(record);
   const deleteAll = async numbers => { for (const n of [...new Set(numbers)].sort((a, b) => b - a)) await store.delete(n); };
-  function remember(change) { undoStack.push(change); if (undoStack.length > 50) undoStack.shift(); redoStack.length = 0; }
+  function remember(change) { undoStack.push(change); if (undoStack.length > 50) undoStack.shift(); redoStack.length = 0; refreshShown(); }
   function offerUndo(message, rows, records) { remember({ kind: "added", rows, records }); saved(message); }
   async function undoOrRedo(redo) {
     if (!store) return;
     const change = (redo ? redoStack : undoStack).pop();
+    refreshShown();
     if (!change) return toast(redo ? t("لا يوجد ما يُعاد.", "Nothing to redo.") : t("لا يوجد ما يُتراجع عنه.", "Nothing to undo."));
     try {
       const rows = await store.rows();
@@ -1568,6 +1569,7 @@ export function runScreen(root, project, screen, store, opts) {
         else { ok = holds(rows, change.restored, change.records); if (ok) await deleteAll(change.restored); }
       }
       if (ok) (redo ? undoStack : redoStack).push(change); else (redo ? undoStack : redoStack).length = 0;
+      refreshShown();
       toast(!ok ? t("تغيّرت هذه السجلات بعد ذلك، فلا يمكن ", "These records changed since, so it can't be ") + (redo ? t("إعادتها.", "redone.") : t("التراجع عنها.", "undone."))
         : redo ? t("تمت الإعادة ↷", "Redone ↷") : t("تم التراجع ↶", "Undone ↶"));
       state.currentRow = null;
@@ -1591,8 +1593,10 @@ export function runScreen(root, project, screen, store, opts) {
     const actual = normalize(source.type === "LABEL" ? source.text : toExcel(source));
     return wanted.length ? wanted.includes(actual) : actual !== "";
   };
+  // Undo/redo buttons may show only while there is something to undo / redo.
+  const historyAllows = c => { const w = prop(c, "showWithHistory"); return w === "canUndo" ? undoStack.length > 0 : w === "canRedo" ? redoStack.length > 0 : true; };
   const boxes = {}; // component id -> its positioned box
-  const refreshShown = () => { for (const c of screen.components) if (boxes[c.id]) boxes[c.id].style.display = isShown(c) ? "" : "none"; };
+  const refreshShown = () => { for (const c of screen.components) if (boxes[c.id]) boxes[c.id].style.display = isShown(c) && historyAllows(c) ? "" : "none"; };
   const formValues = () => Object.fromEntries(binds.map(([c, col]) => [col, isShown(c) ? toExcel(c) : ""]));
   const optionRefreshers = {}; // list id -> redraws its options
   const statLabels = []; // labels showing a statistic of the sheet
