@@ -22,7 +22,7 @@ const BY_TYPE = {
     fontSize: "12", columns: "العمود 1,العمود 2,العمود 3", rows: "3", headerColor: "#FF20B879",
     headerTextColor: "#FFFFFFFF", showGrid: "true", gridColor: "#FFC8D3CD", striped: "false",
     tableOrientation: "horizontal", cellAlign: "center", rowHeight: "0", minColumnWidth: "0",
-    rowNumbers: "false", dataSource: "",
+    rowNumbers: "false", dataSource: "", pickRows: "false", resizeColumns: "true",
   },
   DATE_PICKER: { dateFormat: "yyyy/MM/dd", calendar: "gregorian", defaultToday: "true" },
   CHECKBOX: { backgroundColor: "#00FFFFFF", borderWidth: "0", checked: "false", checkColor: "#FF20B879", boxPosition: "start" },
@@ -1482,28 +1482,26 @@ export function runScreen(root, project, screen, store, opts) {
   }
   function togglePicked(n) { picked.has(n) ? picked.delete(n) : picked.add(n); showPickBar(); tables.forEach(draw => draw()); }
   /** "Undo" for records just added: deletes them again if they still hold what was saved. */
-  let undoBar = null;
+  // The last save on this screen, for an "Undo" button: the rows it added and what they hold.
+  let lastSave = null;
   function offerUndo(message, rows, record, moving) {
-    if (!mayDelete || !store || !rows.length) return saved(message);
-    undoBar?.remove();
-    const bar = h("div", { ...barStyle, bottom: picked.size ? "70px" : "14px" }, { dir: lang === "en" ? "ltr" : "rtl" },
-      h("span", {}, {}, message),
-      barButton(t("تراجع", "Undo"), "#7CE0B5", async () => {
-        bar.remove();
-        try {
-          const now = await store.rows();
-          const same = rows.filter(n => now[n - 1] && Object.entries(record).every(([col, v]) => Number(col) === moving || normalize(now[n - 1][col] ?? "") === normalize(v)));
-          for (const n of [...same].sort((a, b) => b - a)) await store.delete(n);
-          state.currentRow = null;
-          toast(same.length === rows.length ? t(`تم التراجع: حُذف ${same.length} سجل`, `Undone: ${same.length} records deleted`)
-            : t(`تم حذف ${same.length} من ${rows.length}؛ الباقي تغيّر بعد الحفظ فلم يُحذف.`, `Deleted ${same.length} of ${rows.length}; the others changed after saving and were kept.`));
-          await reloadTables();
-        } catch (e) { toast(opts.errorText(e)); }
-      }),
-      barButton("✕", "#9FB5AA", () => bar.remove()));
-    undoBar = bar;
-    document.body.append(bar);
-    setTimeout(() => bar.remove(), 10000);
+    lastSave = { rows, record, moving };
+    saved(message);
+  }
+  /** Deletes the records of the last save again — only rows that still hold what was saved. */
+  async function undoLastSave() {
+    if (!lastSave || !store) return toast(t("لا يوجد حفظ للتراجع عنه.", "Nothing saved to undo."));
+    const { rows, record, moving } = lastSave;
+    try {
+      const now = await store.rows();
+      const same = rows.filter(n => now[n - 1] && Object.entries(record).every(([col, v]) => Number(col) === moving || normalize(now[n - 1][col] ?? "") === normalize(v)));
+      for (const n of [...same].sort((a, b) => b - a)) await store.delete(n);
+      lastSave = null;
+      state.currentRow = null;
+      toast(same.length === rows.length ? t(`تم التراجع: حُذف ${same.length} سجل`, `Undone: ${same.length} records deleted`)
+        : t(`تم حذف ${same.length} من ${rows.length}؛ الباقي تغيّر بعد الحفظ فلم يُحذف.`, `Deleted ${same.length} of ${rows.length}; the others changed after saving and were kept.`));
+      await reloadTables();
+    } catch (e) { toast(opts.errorText(e)); }
   }
   const inputs = {}; // component id -> function(value) updating its element
   const tables = [];
@@ -1800,6 +1798,7 @@ export function runScreen(root, project, screen, store, opts) {
     if (action === "pdfTable") return tableReport();
     if (action === "pdfScreen") return screenReport();
     // Buttons the designer placed instead of the app's own close, lock and sign-out buttons.
+    if (action === "undo") return mayDelete ? undoLastSave() : toast(t("غير مصرّح لك بالحذف.", "You can't delete."));
     if (action === "closeApp") return opts.onClose ? opts.onClose() : toast(t("الإغلاق يعمل في التطبيق المنشور.", "Closing works in the published app."));
     if (action === "lockSettings") return opts.onLockSettings ? opts.onLockSettings() : toast(t("قفل التطبيق يعمل بعد تسجيل الدخول في التطبيق المنشور.", "The app lock works once signed in to the published app."));
     if (action === "signOut") return opts.onSignOut ? opts.onSignOut() : toast(t("تسجيل الخروج يعمل في التطبيق المنشور.", "Signing out works in the published app."));
@@ -2348,10 +2347,10 @@ export function runScreen(root, project, screen, store, opts) {
             const orig = view.columns[k];
             tableSorts[c.id] = { column: orig, descending: sort.column === orig ? !sort.descending : false };
             draw();
-          } } : null, own ? {
+          } } : null, own && bool(c, "pickRows") ? {
             marked: new Set(numbers.map((n, i) => (i > 0 && picked.has(n) ? i : -1)).filter(i => i > 0)),
             onLongPick: line => { const number = numbers[line]; if (number >= 2) togglePicked(number); },
-          } : null, {
+          } : null, bool(c, "resizeColumns") && {
             widths: tableWidths(c.id),
             onWidth: (k, w) => { setTableWidth(c.id, k, w); draw(); },
           }));
@@ -2451,7 +2450,7 @@ export function runScreen(root, project, screen, store, opts) {
     toast(t(`تم عرض الصف ${opts.openRow}`, `Showing row ${opts.openRow}`));
   }
   reloadTables();
-  return () => { window.removeEventListener("resize", fit); freshOff.forEach(off => off?.()); pickBar?.remove(); undoBar?.remove(); };
+  return () => { window.removeEventListener("resize", fit); freshOff.forEach(off => off?.()); pickBar?.remove(); };
 }
 
 /**
