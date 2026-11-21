@@ -1,7 +1,7 @@
 // The standalone runner of an exported web app (one app, no Waraqa screens around it): offline with
 // its data in this browser, or signed in to the team's cloud table. Used by app.html (hosted link)
 // and inlined into exported .html files by the Waraqa app (WebExport.kt), so keep it self-contained.
-import { runApp, offlineTable, isStrongPassword, rememberPassword, securityGate, lockChoice, lockSettings } from "./render.js";
+import { runApp, offlineTable, isStrongPassword, rememberPassword, securityGate, lockChoice, lockSettings, appMenu, profileDialog, passwordDialog } from "./render.js";
 
 // ---- The exported app's shell: runs the one app above, offline in this browser or on the team's cloud table ----
 export async function runStandalone(CONFIG, ICON) {
@@ -14,6 +14,8 @@ export async function runStandalone(CONFIG, ICON) {
   const stage = document.getElementById("stage");
   const menuBtn = document.getElementById("menuBtn");
   const menu = document.getElementById("menu");
+  const barTitle = document.getElementById("barTitle");
+  if (barTitle) barTitle.textContent = CONFIG.name || "";
   let timer;
   const toast = m => { const b = document.getElementById("toast"); b.textContent = m; b.classList.add("show"); clearTimeout(timer); timer = setTimeout(() => b.classList.remove("show"), 3500); };
   const confirmBox = m => Promise.resolve(window.confirm(m));
@@ -44,7 +46,9 @@ export async function runStandalone(CONFIG, ICON) {
   };
   const setMenu = items => {
     menu.replaceChildren(...items.map(([label, fn]) => node("button", { onclick: () => { menu.style.display = "none"; fn(); } }, label)));
-    menuBtn.style.display = items.length ? "block" : "none";
+    // The menu sits in a bar above the design (none without items); older pages have only the button.
+    const bar = document.getElementById("bar");
+    if (bar) bar.style.display = items.length ? "flex" : "none"; else menuBtn.style.display = items.length ? "block" : "none";
   };
   // "Share the app": the phone's share sheet with the app's link, or the link copied.
   const appLink = () => (/^https?:$/.test(location.protocol) ? location.href.split("#")[0] : CONFIG.link || "");
@@ -58,7 +62,6 @@ export async function runStandalone(CONFIG, ICON) {
     try { await navigator.clipboard.writeText(url); toast(t("تم نسخ رابط التطبيق، أرسله لمن تريد.", "The app's link was copied; send it to anyone.")); }
     catch (e) { prompt(t("انسخ رابط التطبيق:", "Copy the app's link:"), url); }
   };
-  const shareItem = [t("مشاركة التطبيق", "Share the app"), shareApp];
   menuBtn.onclick = () => { menu.style.display = menu.style.display === "block" ? "none" : "block"; };
   document.addEventListener("click", e => { if (e.target !== menuBtn && !menu.contains(e.target)) menu.style.display = "none"; });
 
@@ -189,7 +192,8 @@ export async function runStandalone(CONFIG, ICON) {
     if (navigator.storage?.persist) navigator.storage.persist().catch(() => {});
     const store = localStore();
     const extra = {};
-    setMenu([shareItem, [t("تصدير البيانات إلى Excel", "Export data to Excel"), () => exportExcel(store)]]);
+    // The menu its owner chose (sharing and exporting are what a personal app can offer).
+    setMenu(appMenu(project, { share: shareApp, export: () => exportExcel(store) }, lang));
     runApp(stage, project, store, {
       lang, t, toast, confirm: confirmBox, errorText,
       storeFor: id => (project.files || []).some(f => f.id === id) ? (extra[id] ||= localStore(id)) : null,
@@ -306,15 +310,22 @@ export async function runStandalone(CONFIG, ICON) {
       const who = security.whoExports || "everyone";
       const canExport = owner || who === "everyone" || (who === "editors" && editor);
       const requestAccess = security.allowRequests === false ? null : () => fb.setDoc(fb.doc(db, "apps", CONFIG.appId, "requests", user.uid), { email: user.email || "", name: (user.displayName || "").trim(), at: Date.now() });
-      setMenu([
-        shareItem,
-        canExport ? [t("تصدير البيانات إلى Excel", "Export data to Excel"), () => exportExcel(store)] : null,
+      // The menu its owner chose, with what works for this member.
+      const member = !user.isAnonymous;
+      setMenu(appMenu(latest, {
+        profile: member ? () => profileDialog({ name: user.displayName || "", email: user.email || "", t, lang, toast, save: name => fb.updateProfile(user, { displayName: name }) }) : null,
+        password: member ? () => passwordDialog({ uid: user.uid, t, lang, toast, strong: security.strongPasswords !== false,
+          change: async (current, next) => { await fb.reauthenticateWithCredential(user, fb.EmailAuthProvider.credential(user.email, current)); await fb.updatePassword(user, next); } }) : null,
         // Each member picks the locks they want on their device (the owner's required ones stay on).
-        user.isAnonymous ? null : [t("قفل التطبيق", "App lock"), () => lockSettings({ appId: CONFIG.appId, uid: user.uid, security, t, lang,
-          onSaved: () => toast(t("تم حفظ إعدادات القفل.", "Lock settings saved.")) })],
-        [user.isAnonymous ? t("خروج الضيف", "Leave as guest") : t("تسجيل الخروج", "Sign out"), () => { guestLeft = true; fb.signOut(fb.auth); }],
-      ].filter(Boolean));
+        lock: member ? () => lockSettings({ appId: CONFIG.appId, uid: user.uid, security, t, lang, onSaved: () => toast(t("تم حفظ إعدادات القفل.", "Lock settings saved.")) }) : null,
+        share: shareApp,
+        export: canExport ? () => exportExcel(store) : null,
+        signOut: () => { guestLeft = true; fb.signOut(fb.auth); },
+      }, lang).map(([label, fn, id]) => [id === "signOut" && !member ? t("خروج الضيف", "Leave as guest") : label, fn]));
       runApp(stage, latest, store, { lang, t, toast, confirm: confirmBox, errorText, canEdit, canDelete, canExport, requestAccess, storeFor,
+        // Buttons the designer placed for the lock and signing out.
+        onLockSettings: user.isAnonymous ? null : () => lockSettings({ appId: CONFIG.appId, uid: user.uid, security, t, lang, onSaved: () => toast(t("تم حفظ إعدادات القفل.", "Lock settings saved.")) }),
+        onSignOut: () => { guestLeft = true; fb.signOut(fb.auth); },
         user: { uid: user.uid, name: (user.displayName || pendingName || "").trim(), email: user.email || "" }, onScreen: screen => { document.body.style.background = bg(screen); } });
     } catch (e) {
       // Paused, or no longer open to guests: say so plainly.

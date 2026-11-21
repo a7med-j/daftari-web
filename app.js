@@ -12,7 +12,7 @@ import {
   query, where, runTransaction, serverTimestamp, Bytes,
 } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore.js";
 import { firebaseConfig } from "./config.js";
-import { watchUpdates, runApp, useAppManifest, offlineTable, isStrongPassword, rememberPassword, securityGate, lockChoice, lockSettings } from "./render.js";
+import { watchUpdates, runApp, useAppManifest, offlineTable, isStrongPassword, rememberPassword, securityGate, lockChoice, lockSettings, appMenu, profileDialog, passwordDialog } from "./render.js";
 
 // Pages kept in this browser, so the site also opens without a connection.
 if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js").catch(() => {});
@@ -240,8 +240,14 @@ const fromServer = new Set();
 
 async function appView(user, appId) {
   const stage = el("div", { class: "stage" });
-  const close = el("button", { class: "close", onclick: () => { history.replaceState(null, "", location.pathname); route(); } }, "✕ " + t("إغلاق", "Close"));
-  const wrap = el("div", { class: "runner" }, close, stage);
+  const closeApp = () => { history.replaceState(null, "", location.pathname); route(); };
+  // The app's menu (☰), in a bar above the design, never over it: what its owner chose.
+  const menuList = el("div", { class: "appmenu" });
+  const menuBtn = el("button", { class: "menubtn", "aria-label": "menu", onclick: () => menuList.classList.toggle("open") }, "☰");
+  const title = el("b", {}, "");
+  const bar = el("div", { class: "appbar" }, menuBtn, title, menuList);
+  document.addEventListener("click", e => { if (!bar.contains(e.target)) menuList.classList.remove("open"); });
+  const wrap = el("div", { class: "runner" }, bar, stage);
   stage.append(el("p", { class: "muted" }, t("جارٍ فتح التطبيق…", "Opening the app…")));
   // A document from this browser's kept copy when there is one (opens at once), otherwise the server's.
   const keptDoc = async ref => { try { const c = await getDocFromCache(ref); if (c.exists()) return c; } catch (e) {} return null; };
@@ -271,8 +277,25 @@ async function appView(user, appId) {
         lockedApps.set(appId, user.uid);
       }
       // Each member picks the locks they want for this app (the owner's required ones stay on).
-      wrap.append(el("button", { class: "close", style: "inset-inline-start:auto;inset-inline-end:10px",
-        onclick: () => lockSettings({ appId, uid: user.uid, security, t, lang, onSaved: () => toast(t("تم حفظ إعدادات القفل.", "Lock settings saved.")) }) }, "🔒 " + t("القفل", "Lock")));
+      const openLock = () => lockSettings({ appId, uid: user.uid, security, t, lang, onSaved: () => toast(t("تم حفظ إعدادات القفل.", "Lock settings saved.")) });
+      const leave = () => signOut(auth);
+      const shareLink = async () => {
+        const url = location.origin + location.pathname + "?code=" + encodeURIComponent(data.shareCode || "");
+        try { if (navigator.share) return await navigator.share({ title: project.name, url }); } catch (e) { if (e?.name === "AbortError") return; }
+        try { await navigator.clipboard.writeText(url); toast(t("تم نسخ رابط التطبيق.", "The app's link was copied.")); } catch (e) { prompt(t("انسخ الرابط:", "Copy the link:"), url); }
+      };
+      title.textContent = project.name;
+      const items = appMenu(project, {
+        profile: () => profileDialog({ name: user.displayName || "", email: user.email || "", t, lang, toast, save: name => updateProfile(user, { displayName: name }) }),
+        password: () => passwordDialog({ uid: user.uid, t, lang, toast, strong: security.strongPasswords !== false,
+          change: async (current, next) => { await reauthenticateWithCredential(user, EmailAuthProvider.credential(user.email, current)); await updatePassword(user, next); } }),
+        lock: openLock,
+        share: data.shareCode ? shareLink : null,
+        signOut: leave,
+        close: closeApp,
+      }, lang);
+      menuList.replaceChildren(...items.map(([label, fn]) => el("button", { onclick: () => { menuList.classList.remove("open"); fn(); } }, label)));
+      if (!items.length) bar.remove();
       // "Add to home screen" now opens this app directly.
       useAppManifest(project.name, location.pathname + "?app=" + encodeURIComponent(appId), project.icon || "icon-512.png");
       // The owner and members the owner made editors may change records; other members only look.
@@ -291,6 +314,7 @@ async function appView(user, appId) {
         storeFor,
         user: { uid: user.uid, name: (user.displayName || "").trim(), email: user.email || "" },
         lang, t, toast, confirm: confirmBox, errorText, canEdit, canDelete, canExport, requestAccess,
+        onClose: closeApp, onLockSettings: openLock, onSignOut: leave,
         onScreen: screen => { wrap.style.background = cssBackground(screen); },
       });
       cleanup = app.cleanup;

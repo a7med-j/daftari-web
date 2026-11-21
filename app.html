@@ -20,9 +20,11 @@ html, body { margin: 0; min-height: 100%; background: var(--ink); color: #fff; f
 .btn:disabled { opacity: .6; }
 .lnk { background: none; border: 0; color: var(--green); cursor: pointer; font: inherit; padding: 6px; }
 .muted { color: var(--muted); }
-#menuBtn { position: fixed; top: 10px; inset-inline-start: 10px; z-index: 30; width: 38px; height: 38px; border: 0; border-radius: 50%;
-  background: rgba(16,37,31,.8); color: #fff; font-size: 20px; cursor: pointer; display: none; }
-#menu { position: fixed; top: 54px; inset-inline-start: 10px; z-index: 31; background: #fff; color: #183328; border-radius: 10px;
+/* The app's menu: a slim bar above the design (never over it), shown only when it has items. */
+#bar { position: sticky; top: 0; z-index: 30; height: 48px; display: none; align-items: center; gap: 4px; padding: 0 6px; background: var(--ink, #10251F); }
+#bar b { font-size: 15px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#menuBtn { width: 40px; height: 40px; border: 0; background: none; color: #fff; font-size: 22px; cursor: pointer; }
+#menu { position: fixed; top: 48px; inset-inline-start: 10px; z-index: 31; background: #fff; color: #183328; border-radius: 10px;
   box-shadow: 0 6px 18px rgba(0,0,0,.3); overflow: hidden; display: none; min-width: 210px; }
 #menu button { display: block; width: 100%; text-align: start; padding: 12px 16px; border: 0; background: none; font: inherit; cursor: pointer; }
 #menu button:hover { background: #eef5f1; }
@@ -32,7 +34,7 @@ html, body { margin: 0; min-height: 100%; background: var(--ink); color: #fff; f
 </style>
 </head>
 <body>
-<button id="menuBtn" aria-label="menu">⋮</button>
+<div id="bar"><button id="menuBtn" aria-label="menu">☰</button><b id="barTitle"></b></div>
 <div id="menu"></div>
 <div id="stage"><div class="center"><h2></h2><p class="muted">…</p></div></div>
 <div id="toast"></div>

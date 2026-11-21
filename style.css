@@ -23,6 +23,15 @@ button.app { text-align: start; display: flex; flex-direction: column; gap: 4px;
 button.app small { color: var(--muted); }
 .runner { min-height: 100vh; }
 .runner .stage { width: 100%; }
+/* The app's menu (☰), in a bar above the design (never over it). */
+.appbar { display: flex; align-items: center; gap: 6px; height: 48px; padding: 0 6px; background: #10251F; position: sticky; top: 0; z-index: 10; }
+.appbar b { font-size: 15px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.appbar .menubtn { width: 40px; height: 40px; border: 0; background: none; color: #fff; font-size: 22px; cursor: pointer; }
+.appmenu { display: none; position: absolute; top: 48px; inset-inline-start: 6px; background: #fff; color: #183328; border-radius: 10px;
+  box-shadow: 0 6px 18px rgba(0,0,0,.3); overflow: hidden; min-width: 210px; }
+.appmenu.open { display: block; }
+.appmenu button { display: block; width: 100%; text-align: start; padding: 12px 16px; border: 0; background: none; font: inherit; cursor: pointer; color: inherit; }
+.appmenu button:hover { background: #eef5f1; }
 .close { position: fixed; top: 10px; inset-inline-start: 10px; z-index: 10; border: 0; border-radius: 20px; padding: 6px 14px;
   background: rgba(16,37,31,.8); color: #fff; cursor: pointer; }
 .hinted::placeholder { color: var(--hint, #8a9a92); opacity: 1; }

@@ -529,6 +529,68 @@ export function lockSettings({ appId, uid, security, t, lang, onSaved }) {
   document.body.append(cover);
 }
 
+// ---- The app's standard ☰ menu (chosen by its owner when exporting or publishing; see AppMenu) ----
+
+const MENU_ITEMS = [
+  ["profile", "الملف الشخصي", "Profile"], ["password", "تغيير كلمة المرور", "Change password"], ["lock", "قفل التطبيق", "App lock"],
+  ["share", "مشاركة التطبيق", "Share the app"], ["export", "تصدير البيانات إلى Excel", "Export data to Excel"],
+  ["signOut", "تسجيل الخروج", "Sign out"], ["close", "إغلاق", "Close"],
+];
+const MENU_DEFAULT = ["profile", "password", "lock", "share", "export", "signOut"];
+
+/**
+ * The menu entries [label, action] for a project: the items its owner chose, in order, for which
+ * `actions` has a handler (an item that can't work here is left out).
+ */
+export function appMenu(project, actions, lang) {
+  const chosen = Array.isArray(project.appMenu) ? project.appMenu : MENU_DEFAULT;
+  return MENU_ITEMS.filter(([id]) => chosen.includes(id) && actions[id]).map(([id, ar, en]) => [lang === "en" ? en : ar, actions[id], id]);
+}
+
+/** A small dialog with fields; resolves with their values, or null when cancelled. */
+function formDialog({ title, fields, note, t, lang, submit }) {
+  return new Promise(resolve => {
+    const cover = h("div", { position: "fixed", inset: "0", background: "rgba(0,0,0,.55)", zIndex: "120", display: "flex", alignItems: "center", justifyContent: "center", padding: "16px" });
+    const inputs = fields.map(f => {
+      const i = h("input", { padding: "11px", borderRadius: "10px", border: "1px solid #4f6b5f", background: "#0b1c16", color: "#fff", fontSize: "15px" },
+        { type: f.type || "text", placeholder: f.label, dir: "auto" });
+      i.value = f.value || "";
+      return i;
+    });
+    const ok = h("button", { padding: "12px", borderRadius: "10px", border: "0", background: "#20B879", color: "#fff", fontSize: "15px", cursor: "pointer" }, {}, submit);
+    const cancel = h("button", { padding: "10px", borderRadius: "10px", border: "0", background: "transparent", color: "#9FB5AA", fontSize: "14px", cursor: "pointer" }, {}, t("إلغاء", "Cancel"));
+    const close = v => { cover.remove(); resolve(v); };
+    ok.onclick = () => close({ values: inputs.map(i => i.value) });
+    cancel.onclick = () => close(null);
+    cover.append(h("div", { maxWidth: "380px", width: "100%", padding: "20px", borderRadius: "16px", background: "#172C24", color: "#fff", display: "flex", flexDirection: "column", gap: "10px" }, { dir: lang === "en" ? "ltr" : "rtl" },
+      h("h3", { margin: "0" }, {}, title), note ? h("p", { margin: "0", fontSize: "13px", color: "#9FB5AA" }, {}, note) : null, ...inputs, ok, cancel));
+    document.body.append(cover);
+  });
+}
+
+/** The member's name (changeable) and email. `save(name)` changes it. */
+export async function profileDialog({ name, email, t, lang, save, toast }) {
+  const r = await formDialog({ title: t("الملف الشخصي", "Profile"), note: t("البريد: ", "Email: ") + (email || "—"), t, lang, submit: t("حفظ", "Save"),
+    fields: [{ label: t("الاسم", "Name"), value: name }] });
+  if (!r) return;
+  const next = r.values[0].trim().slice(0, 40);
+  if (!next) return toast(t("اكتب اسمك.", "Enter your name."));
+  try { await save(next); toast(t("تم حفظ الاسم ✓", "Name saved ✓")); } catch (e) { toast(String(e?.message || e)); }
+}
+
+/** Current password, then the new one twice. `change(current, next)` does it (throws on a wrong current one). */
+export async function passwordDialog({ uid, t, lang, change, toast, strong = true }) {
+  const r = await formDialog({ title: t("تغيير كلمة المرور", "Change password"), t, lang, submit: t("تغيير", "Change"),
+    note: strong ? t("٨ أحرف على الأقل، فيها حرف ورقم.", "At least 8 characters, with a letter and a digit.") : t("٦ أحرف على الأقل.", "At least 6 characters."),
+    fields: [{ label: t("كلمة المرور الحالية", "Current password"), type: "password" }, { label: t("كلمة المرور الجديدة", "New password"), type: "password" }, { label: t("أعد كتابة الجديدة", "New password again"), type: "password" }] });
+  if (!r) return;
+  const [current, next, again] = r.values;
+  if (strong ? !isStrongPassword(next) : next.length < 6) return toast(t("الكلمة الجديدة ضعيفة.", "The new password is weak."));
+  if (next !== again) return toast(t("الكلمتان الجديدتان غير متطابقتين.", "The new passwords don't match."));
+  try { await change(current, next); if (uid) await rememberPassword(uid, next); toast(t("تم تغيير كلمة المرور ✓", "Password changed ✓")); }
+  catch (e) { toast(/credential|wrong-password/.test(String(e?.code || e)) ? t("كلمة المرور الحالية غير صحيحة.", "The current password is wrong.") : String(e?.message || e)); }
+}
+
 export function forgetSecurity(uid) {
   for (const k of ["waraqa-pw:", "waraqa-pw-ok:", "waraqa-key:"]) store.set(k + uid, null);
 }
@@ -1199,6 +1261,11 @@ export function withAddedFields(screen, headers) {
   return { ...screen, components: [...moved, ...added] };
 }
 
+/** Whether some screen of the project has a button doing `action` (then the app adds none of its own). */
+export function designedAction(project, action) {
+  return (project.screens || []).some(s => s.components.some(c => c.type === "BUTTON" && prop(c, "action") === action));
+}
+
 /** Column index of each input bound to a header, like FormLogic.bindings. */
 export function bindings(screen, headers) {
   const out = [];
@@ -1724,6 +1791,10 @@ export function runScreen(root, project, screen, store, opts) {
     if (action === "pdfRecord") return recordReport();
     if (action === "pdfTable") return tableReport();
     if (action === "pdfScreen") return screenReport();
+    // Buttons the designer placed instead of the app's own close, lock and sign-out buttons.
+    if (action === "closeApp") return opts.onClose ? opts.onClose() : toast(t("الإغلاق يعمل في التطبيق المنشور.", "Closing works in the published app."));
+    if (action === "lockSettings") return opts.onLockSettings ? opts.onLockSettings() : toast(t("قفل التطبيق يعمل بعد تسجيل الدخول في التطبيق المنشور.", "The app lock works once signed in to the published app."));
+    if (action === "signOut") return opts.onSignOut ? opts.onSignOut() : toast(t("تسجيل الخروج يعمل في التطبيق المنشور.", "Signing out works in the published app."));
     if (action === "addField") return toast(opts.canEdit === false ? t("غير مصرّح لك بالإضافة.", "You can't add.")
       : t("إضافة الحقول تتم من تطبيق ورقة: يضيفها صاحب التطبيق ثم يعيد النشر.", "Fields are added in the Waraqa app: its owner adds them, then publishes again."));
     if (action === "excelTable") return exportTable();
