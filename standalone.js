@@ -311,17 +311,17 @@ export async function runStandalone(CONFIG, ICON) {
       const canExport = owner || who === "everyone" || (who === "editors" && editor);
       const requestAccess = security.allowRequests === false ? null : () => fb.setDoc(fb.doc(db, "apps", CONFIG.appId, "requests", user.uid), { email: user.email || "", name: (user.displayName || "").trim(), at: Date.now() });
       // The menu its owner chose, with what works for this member.
-      const member = !user.isAnonymous;
+      const signedIn = !user.isAnonymous;
       setMenu(appMenu(latest, {
-        profile: member ? () => profileDialog({ name: user.displayName || "", email: user.email || "", t, lang, toast, save: name => fb.updateProfile(user, { displayName: name }) }) : null,
-        password: member ? () => passwordDialog({ uid: user.uid, t, lang, toast, strong: security.strongPasswords !== false,
+        profile: signedIn ? () => profileDialog({ name: user.displayName || "", email: user.email || "", t, lang, toast, save: name => fb.updateProfile(user, { displayName: name }) }) : null,
+        password: signedIn ? () => passwordDialog({ uid: user.uid, t, lang, toast, strong: security.strongPasswords !== false,
           change: async (current, next) => { await fb.reauthenticateWithCredential(user, fb.EmailAuthProvider.credential(user.email, current)); await fb.updatePassword(user, next); } }) : null,
         // Each member picks the locks they want on their device (the owner's required ones stay on).
-        lock: member ? () => lockSettings({ appId: CONFIG.appId, uid: user.uid, security, t, lang, onSaved: () => toast(t("تم حفظ إعدادات القفل.", "Lock settings saved.")) }) : null,
+        lock: signedIn ? () => lockSettings({ appId: CONFIG.appId, uid: user.uid, security, t, lang, onSaved: () => toast(t("تم حفظ إعدادات القفل.", "Lock settings saved.")) }) : null,
         share: shareApp,
         export: canExport ? () => exportExcel(store) : null,
         signOut: () => { guestLeft = true; fb.signOut(fb.auth); },
-      }, lang).map(([label, fn, id]) => [id === "signOut" && !member ? t("خروج الضيف", "Leave as guest") : label, fn]));
+      }, lang).map(([label, fn, id]) => [id === "signOut" && !signedIn ? t("خروج الضيف", "Leave as guest") : label, fn]));
       runApp(stage, latest, store, { lang, t, toast, confirm: confirmBox, errorText, canEdit, canDelete, canExport, requestAccess, storeFor,
         // Buttons the designer placed for the lock and signing out.
         onLockSettings: user.isAnonymous ? null : () => lockSettings({ appId: CONFIG.appId, uid: user.uid, security, t, lang, onSaved: () => toast(t("تم حفظ إعدادات القفل.", "Lock settings saved.")) }),
