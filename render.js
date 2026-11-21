@@ -1380,6 +1380,56 @@ export function runScreen(root, project, screen, store, opts) {
     return statistic(rows, numbers, kind, prop(c, "statColumn") ? colOfName(prop(c, "statColumn")) : null);
   }
   const state = { currentRow: null, lastCriteria: null, filledSnapshot: null, sheetRows: null, working: false };
+  // Rows ticked with a long press (Excel row numbers of this screen's file), to delete several at once.
+  const picked = new Set();
+  let pickBar = null;
+  const mayDelete = opts.canEdit !== false && opts.canDelete !== false;
+  const barStyle = { position: "fixed", left: "50%", transform: "translateX(-50%)", bottom: "14px", zIndex: "40", background: "#10251FF0", color: "#fff",
+    borderRadius: "16px", padding: "6px 10px", display: "flex", alignItems: "center", gap: "8px", fontSize: "14px", boxShadow: "0 4px 14px #0005", maxWidth: "94vw" };
+  const barButton = (text, color, onclick) => h("button", { background: "none", border: "0", color, fontSize: "14px", cursor: "pointer", padding: "6px 8px", fontWeight: "bold" }, { onclick }, text);
+  function showPickBar() {
+    pickBar?.remove(); pickBar = null;
+    if (!picked.size) return;
+    pickBar = h("div", barStyle, { dir: lang === "en" ? "ltr" : "rtl" },
+      h("span", {}, {}, t(`محدد: ${picked.size}`, `Selected: ${picked.size}`)),
+      mayDelete ? barButton(t("حذف المحدد", "Delete selected"), "#FF8A80", async () => {
+        const rows = [...picked];
+        if (!(await opts.confirm(t(`حذف ${rows.length} صفوف؟ تصعد الصفوف التي بعدها.`, `Delete ${rows.length} rows? The rows below move up.`)))) return;
+        try {
+          for (const n of rows.sort((a, b) => b - a)) await store.delete(n);
+          picked.clear(); showPickBar(); clearForm();
+          saved(t(`تم حذف ${rows.length} صفوف`, `${rows.length} rows deleted`));
+          await reloadTables();
+        } catch (e) { toast(opts.errorText(e)); }
+      }) : null,
+      barButton(t("إلغاء التحديد", "Clear selection"), "#fff", () => { picked.clear(); showPickBar(); tables.forEach(draw => draw()); }));
+    document.body.append(pickBar);
+  }
+  function togglePicked(n) { picked.has(n) ? picked.delete(n) : picked.add(n); showPickBar(); tables.forEach(draw => draw()); }
+  /** "Undo" for records just added: deletes them again if they still hold what was saved. */
+  let undoBar = null;
+  function offerUndo(message, rows, record, moving) {
+    if (!mayDelete || !store || !rows.length) return saved(message);
+    undoBar?.remove();
+    const bar = h("div", { ...barStyle, bottom: picked.size ? "70px" : "14px" }, { dir: lang === "en" ? "ltr" : "rtl" },
+      h("span", {}, {}, message),
+      barButton(t("تراجع", "Undo"), "#7CE0B5", async () => {
+        bar.remove();
+        try {
+          const now = await store.rows();
+          const same = rows.filter(n => now[n - 1] && Object.entries(record).every(([col, v]) => Number(col) === moving || normalize(now[n - 1][col] ?? "") === normalize(v)));
+          for (const n of [...same].sort((a, b) => b - a)) await store.delete(n);
+          state.currentRow = null;
+          toast(same.length === rows.length ? t(`تم التراجع: حُذف ${same.length} سجل`, `Undone: ${same.length} records deleted`)
+            : t(`تم حذف ${same.length} من ${rows.length}؛ الباقي تغيّر بعد الحفظ فلم يُحذف.`, `Deleted ${same.length} of ${rows.length}; the others changed after saving and were kept.`));
+          await reloadTables();
+        } catch (e) { toast(opts.errorText(e)); }
+      }),
+      barButton("✕", "#9FB5AA", () => bar.remove()));
+    undoBar = bar;
+    document.body.append(bar);
+    setTimeout(() => bar.remove(), 10000);
+  }
   const inputs = {}; // component id -> function(value) updating its element
   const tables = [];
 
@@ -1724,15 +1774,16 @@ export function runScreen(root, project, screen, store, opts) {
         const dateField = byName(button ? prop(button, "repeatDateField") : "");
         const dateCol = dateField ? binds.find(([b]) => b === dateField)?.[1] : null;
         const first = formValues();
-        let row = 0;
+        const addedRows = [];
         for (let i = 0; i < times; i++) {
           const record = i === 0 || dateCol == null ? first : { ...first, [dateCol]: addPeriods(first[dateCol] ?? "", prop(dateField, "dateFormat"), i) ?? first[dateCol] };
-          const added = await store.append(record);
-          if (i === 0) row = added;
+          addedRows.push(await store.append(record));
         }
         clearForm();
-        if (times > 1) saved(t(`تمت إضافة ${times} سجلات ✓`, `${times} records added ✓`));
-        else saved(t(`تمت إضافة الصف رقم ${row} ✓`, `Row ${row} added ✓`) + (assigned.length ? " — " + assigned.join("، ") : ""));
+        // A mistake (say, too many months) can be taken back at once.
+        offerUndo(times > 1 ? t(`تمت إضافة ${times} سجلات ✓`, `${times} records added ✓`)
+          : t(`تمت إضافة الصف رقم ${addedRows[0]} ✓`, `Row ${addedRows[0]} added ✓`) + (assigned.length ? " — " + assigned.join("، ") : ""),
+          addedRows, first, times > 1 && dateCol != null ? dateCol : null);
       } else if (action === "search") {
         const field = button ? prop(button, "searchField") : "";
         const mode = (button && prop(button, "matchMode")) || "exact";
@@ -2209,6 +2260,8 @@ export function runScreen(root, project, screen, store, opts) {
             const number = numbers[line];
             const row = state.sheetRows?.[number - 1];
             if (!row || number < 2) return;
+            // While ticking rows, a tap ticks or unticks one.
+            if (picked.size) return togglePicked(number);
             fill(row);
             state.currentRow = number; state.lastCriteria = null; state.filledSnapshot = formValues();
             draw();
@@ -2216,7 +2269,10 @@ export function runScreen(root, project, screen, store, opts) {
             const orig = view.columns[k];
             tableSorts[c.id] = { column: orig, descending: sort.column === orig ? !sort.descending : false };
             draw();
-          } } : null));
+          } } : null, own ? {
+            marked: new Set(numbers.map((n, i) => (i > 0 && picked.has(n) ? i : -1)).filter(i => i > 0)),
+            onLongPick: line => { const number = numbers[line]; if (number >= 2) togglePicked(number); },
+          } : null));
         };
         draw();
         if (fromSheet) tables.push(draw);
@@ -2313,7 +2369,7 @@ export function runScreen(root, project, screen, store, opts) {
     toast(t(`تم عرض الصف ${opts.openRow}`, `Showing row ${opts.openRow}`));
   }
   reloadTables();
-  return () => { window.removeEventListener("resize", fit); freshOff.forEach(off => off?.()); };
+  return () => { window.removeEventListener("resize", fit); freshOff.forEach(off => off?.()); pickBar?.remove(); undoBar?.remove(); };
 }
 
 /**
@@ -2344,7 +2400,19 @@ export function runApp(root, project, store, opts) {
 }
 
 /** Table from grid (line 0 = headers). Vertical orientation shows one column per record. */
-function drawTable(c, style, grid, currentRow, onPick, sort = null) {
+function drawTable(c, style, grid, currentRow, onPick, sort = null, ticks = null) {
+  // Ticked lines (for deleting several records), and a long press (or right click) that ticks one.
+  const marked = ticks?.marked || new Set();
+  const onLongPick = ticks?.onLongPick || null;
+  const pickable = (el, line, ok) => {
+    let timer = null, long = false;
+    el.addEventListener("click", () => { if (long) { long = false; return; } if (ok()) onPick?.(line); });
+    if (!onLongPick) return;
+    const cancel = () => { clearTimeout(timer); timer = null; };
+    el.addEventListener("pointerdown", () => { long = false; cancel(); timer = setTimeout(() => { long = true; if (ok()) onLongPick(line); }, 550); });
+    ["pointerup", "pointerleave", "pointercancel"].forEach(ev => el.addEventListener(ev, cancel));
+    el.addEventListener("contextmenu", e => { e.preventDefault(); cancel(); if (ok()) onLongPick(line); });
+  };
   const headers = grid[0] || [];
   const records = grid.slice(1);
   const fields = Math.max(headers.length, ...records.map(r => r.length), 1);
@@ -2368,21 +2436,24 @@ function drawTable(c, style, grid, currentRow, onPick, sort = null) {
     ...(head ? headStyle : style), border: grid_, height: rowH + "px", padding: "0 4px", textAlign: align,
     whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", maxWidth: "1px", ...(minW > 0 ? { minWidth: minW + "px" } : {}), ...extra,
   }, { dir: "auto" }, text);
-  const recordBg = i => i + 1 === currentRow - 1 ? "rgba(32,184,121,.3)" : (striped && i % 2 === 1 ? cssColor(prop(c, "gridColor")) : "transparent");
+  const recordBg = i => marked.has(i + 1) ? "rgba(32,184,121,.55)" : i + 1 === currentRow - 1 ? "rgba(32,184,121,.3)" : (striped && i % 2 === 1 ? cssColor(prop(c, "gridColor")) : "transparent");
   const table = h("table", { borderCollapse: "collapse", width: minW > 0 ? "auto" : "100%", tableLayout: minW > 0 ? "auto" : "fixed" });
   if (!vertical) {
     table.append(h("tr", {}, {}, numbers ? cell("#", true, { width: "34px", maxWidth: "none" }) : null, Array.from({ length: fields }, (_, i) => headCell(i))));
-    records.forEach((r, i) => table.append(h("tr", { background: recordBg(i), cursor: onPick ? "pointer" : "default" },
-      { onclick: () => onPick && r.length && onPick(i + 1) },
-      numbers ? cell(String(i + 1), false, { width: "34px", maxWidth: "none" }) : null,
-      Array.from({ length: fields }, (_, k) => cell(r[k] ?? "", false)))));
+    records.forEach((r, i) => {
+      const tr = h("tr", { background: recordBg(i), cursor: onPick ? "pointer" : "default", userSelect: onLongPick ? "none" : "" }, {},
+        numbers ? cell(marked.has(i + 1) ? "✓" : String(i + 1), false, { width: "34px", maxWidth: "none" }) : null,
+        Array.from({ length: fields }, (_, k) => cell(r[k] ?? "", false)));
+      pickable(tr, i + 1, () => !!onPick && r.length > 0);
+      table.append(tr);
+    });
   } else {
     if (numbers) table.append(h("tr", {}, {}, cell("#", true), records.map((_, i) => cell(String(i + 1), true))));
     for (let k = 0; k < fields; k++) {
       table.append(h("tr", {}, {}, headCell(k),
         records.map((r, i) => cell(r[k] ?? "", false, { background: recordBg(i), cursor: onPick ? "pointer" : "default" }))));
     }
-    if (onPick) table.querySelectorAll("tr").forEach(tr => [...tr.children].slice(1).forEach((td, i) => td.addEventListener("click", () => records[i]?.length && onPick(i + 1))));
+    if (onPick) table.querySelectorAll("tr").forEach(tr => [...tr.children].slice(1).forEach((td, i) => pickable(td, i + 1, () => !!records[i]?.length)));
   }
   return table;
 }
