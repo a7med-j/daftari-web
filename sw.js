@@ -3,7 +3,7 @@
 // the background; when its content changed, open pages are told. The Firebase library (fixed
 // versions): the kept copy. Data itself is kept by Firestore. Any problem here falls back to the
 // plain network, so a page is never left hanging.
-const CACHE = "waraqa-v5";
+const CACHE = "waraqa-v6";
 
 self.addEventListener("install", () => self.skipWaiting());
 self.addEventListener("activate", e => e.waitUntil((async () => {

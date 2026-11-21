@@ -1888,7 +1888,9 @@ export function runScreen(root, project, screen, store, opts) {
   const landscape = (screen.properties || {}).orientation === "landscape";
   const pageW = landscape ? Math.max(f.width, f.height) : Math.min(f.width, f.height);
   // Added fields can push the page down: it grows to keep them all (and scrolls).
-  const pageH = Math.max(landscape ? Math.min(f.width, f.height) : Math.max(f.width, f.height),
+  // A screen can have its own height (e.g. a long report); 0 or none = the project's.
+  const ownH = parseFloat((screen.properties || {}).pageHeight) || 0;
+  const pageH = Math.max(ownH > 0 ? Math.min(Math.max(ownH, 240), 2000) : landscape ? Math.min(f.width, f.height) : Math.max(f.width, f.height),
     screen === designed ? 0 : Math.max(0, ...screen.components.map(c => c.y + c.height)) + 16);
 
   // Positions are physical (left/top) in both languages, so the page itself is laid out left-to-right.
