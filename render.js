@@ -1472,6 +1472,14 @@ export function runScreen(root, project, screen, store, opts) {
       barButton(t("إلغاء التحديد", "Clear selection"), "#fff", () => { picked.clear(); showPickBar(); tables.forEach(draw => draw()); }));
     document.body.append(pickBar);
   }
+  // Column widths each person drags in tables, kept in this browser per app and table.
+  const widthKey = id => `waraqa-colw:${project.id || project.name}:${id}`;
+  function tableWidths(id) { try { return JSON.parse(localStorage.getItem(widthKey(id)) || "{}") || {}; } catch (e) { return {}; } }
+  function setTableWidth(id, k, w) {
+    const next = tableWidths(id);
+    if (w > 0) next[k] = w; else delete next[k];
+    try { localStorage.setItem(widthKey(id), JSON.stringify(next)); } catch (e) {}
+  }
   function togglePicked(n) { picked.has(n) ? picked.delete(n) : picked.add(n); showPickBar(); tables.forEach(draw => draw()); }
   /** "Undo" for records just added: deletes them again if they still hold what was saved. */
   let undoBar = null;
@@ -2343,7 +2351,10 @@ export function runScreen(root, project, screen, store, opts) {
           } } : null, own ? {
             marked: new Set(numbers.map((n, i) => (i > 0 && picked.has(n) ? i : -1)).filter(i => i > 0)),
             onLongPick: line => { const number = numbers[line]; if (number >= 2) togglePicked(number); },
-          } : null));
+          } : null, {
+            widths: tableWidths(c.id),
+            onWidth: (k, w) => { setTableWidth(c.id, k, w); draw(); },
+          }));
         };
         draw();
         if (fromSheet) tables.push(draw);
@@ -2471,7 +2482,10 @@ export function runApp(root, project, store, opts) {
 }
 
 /** Table from grid (line 0 = headers). Vertical orientation shows one column per record. */
-function drawTable(c, style, grid, currentRow, onPick, sort = null, ticks = null) {
+function drawTable(c, style, grid, currentRow, onPick, sort = null, ticks = null, sizing = null) {
+  // Column widths the person dragged (kept in this browser): { widths: {k: px}, onWidth(k, px|0) }.
+  const widths = sizing?.widths || {};
+  const custom = Object.keys(widths).length > 0;
   // Ticked lines (for deleting several records), and a long press (or right click) that ticks one.
   const marked = ticks?.marked || new Set();
   const onLongPick = ticks?.onLongPick || null;
@@ -2499,8 +2513,36 @@ function drawTable(c, style, grid, currentRow, onPick, sort = null, ticks = null
   // Sortable headers show an arrow on the sorted column and sort when tapped.
   const headCell = k => {
     const arrow = sort && sort.column === k ? (sort.descending ? " ▼" : " ▲") : "";
-    const th = cell((headers[k] ?? "") + arrow, true, sort ? { cursor: "pointer", userSelect: "none" } : {});
+    const width = widths[k] ? { width: widths[k] + "px", minWidth: widths[k] + "px", maxWidth: widths[k] + "px" } : {};
+    const th = cell((headers[k] ?? "") + arrow, true, { ...(sort ? { cursor: "pointer", userSelect: "none" } : {}), ...width, position: "relative" });
     if (sort) { th.title = "فرز"; th.addEventListener("click", () => sort.onSort(k)); }
+    // Drag the header's edge to widen or narrow the column; a double tap makes it automatic again.
+    if (sizing?.onWidth && !vertical) {
+      const grip = h("span", { position: "absolute", top: "0", bottom: "0", insetInlineEnd: "0", width: "12px", cursor: "col-resize", touchAction: "none",
+        display: "flex", alignItems: "center", justifyContent: "center" }, {}, h("span", { width: "2px", height: "50%", background: "rgba(255,255,255,.6)" }));
+      let startX = 0, startW = 0, scale = 1, dragging = false;
+      const rtl = getComputedStyle(th).direction === "rtl";
+      grip.addEventListener("click", e => e.stopPropagation());
+      grip.addEventListener("dblclick", e => { e.stopPropagation(); sizing.onWidth(k, 0); });
+      grip.addEventListener("pointerdown", e => {
+        e.stopPropagation(); e.preventDefault();
+        const box = th.getBoundingClientRect();
+        scale = box.width / (th.offsetWidth || box.width || 1) || 1;
+        startX = e.clientX; startW = th.offsetWidth; dragging = true;
+        grip.setPointerCapture(e.pointerId);
+      });
+      grip.addEventListener("pointermove", e => {
+        if (!dragging) return;
+        const w = Math.max(40, Math.min(600, startW + ((e.clientX - startX) / scale) * (rtl ? -1 : 1)));
+        for (const el of [th, ...table.querySelectorAll(`[data-col="${k}"]`)]) Object.assign(el.style, { width: w + "px", minWidth: w + "px", maxWidth: w + "px" });
+        table.style.width = "auto"; table.style.tableLayout = "fixed";
+        th.dataset.w = String(Math.round(w));
+      });
+      const end = () => { if (!dragging) return; dragging = false; if (th.dataset.w) sizing.onWidth(k, Number(th.dataset.w)); };
+      grip.addEventListener("pointerup", end);
+      grip.addEventListener("pointercancel", end);
+      th.append(grip);
+    }
     return th;
   };
   const cell = (text, head, extra = {}) => h(head ? "th" : "td", {
@@ -2508,13 +2550,16 @@ function drawTable(c, style, grid, currentRow, onPick, sort = null, ticks = null
     whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", maxWidth: "1px", ...(minW > 0 ? { minWidth: minW + "px" } : {}), ...extra,
   }, { dir: "auto" }, text);
   const recordBg = i => marked.has(i + 1) ? "rgba(32,184,121,.55)" : i + 1 === currentRow - 1 ? "rgba(32,184,121,.3)" : (striped && i % 2 === 1 ? cssColor(prop(c, "gridColor")) : "transparent");
-  const table = h("table", { borderCollapse: "collapse", width: minW > 0 ? "auto" : "100%", tableLayout: minW > 0 ? "auto" : "fixed" });
+  const table = h("table", { borderCollapse: "collapse", width: minW > 0 || custom ? "auto" : "100%", tableLayout: minW > 0 && !custom ? "auto" : "fixed" });
+  // Without a width of its own, a column takes the minimum (or 100px once some are dragged, so it scrolls sideways).
+  const colWidth = k => widths[k] ? widths[k] : custom ? Math.max(minW, 100) : 0;
+  const sized = (el, k) => { const w = colWidth(k); if (w) Object.assign(el.style, { width: w + "px", minWidth: w + "px", maxWidth: w + "px" }); el.dataset.col = String(k); return el; };
   if (!vertical) {
-    table.append(h("tr", {}, {}, numbers ? cell("#", true, { width: "34px", maxWidth: "none" }) : null, Array.from({ length: fields }, (_, i) => headCell(i))));
+    table.append(h("tr", {}, {}, numbers ? cell("#", true, { width: "34px", maxWidth: "none" }) : null, Array.from({ length: fields }, (_, i) => sized(headCell(i), i))));
     records.forEach((r, i) => {
       const tr = h("tr", { background: recordBg(i), cursor: onPick ? "pointer" : "default", userSelect: onLongPick ? "none" : "" }, {},
         numbers ? cell(marked.has(i + 1) ? "✓" : String(i + 1), false, { width: "34px", maxWidth: "none" }) : null,
-        Array.from({ length: fields }, (_, k) => cell(r[k] ?? "", false)));
+        Array.from({ length: fields }, (_, k) => sized(cell(r[k] ?? "", false), k)));
       pickable(tr, i + 1, () => !!onPick && r.length > 0);
       table.append(tr);
     });
