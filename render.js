@@ -893,6 +893,31 @@ export function offlineTable(fs, col, headers, author, allowOffline = true) {
     },
     async update(number, values) { await change(number, "update", Object.fromEntries(Object.entries(values).map(([k, v]) => [String(k), v]))); },
     async delete(number) { await change(number, "delete", {}); },
+    /** Puts a record before the one now at row [number] (in its chunk); offline it goes at the end. */
+    async insert(number, values) {
+      const next = snapshot[number - 2];
+      if (!next || next.pending || queue().length || !navigator.onLine) return this.append(values);
+      const width = Math.max(headers.length, ...Object.keys(values).map(k => Number(k) + 1));
+      const cells = Array.from({ length: width }, (_, i) => values[i] ?? "");
+      const id = crypto.randomUUID();
+      try {
+        const holder = (await fs.getDocsFromServer(col)).docs.find(d => readRows(d.data().rows).some(r => r.id === next.id));
+        if (!holder) return this.append(values);
+        await fs.runTransaction(fs.db, async tx => {
+          const rows = readRows((await tx.get(holder.ref)).data()?.rows);
+          const at = rows.findIndex(r => r.id === next.id);
+          rows.splice(at < 0 ? rows.length : at, 0, { ...author(), id, c: cells });
+          tx.set(holder.ref, { rows, updatedAt: fs.serverTimestamp() });
+        });
+      } catch (e) {
+        if (isOffline(e) && allowOffline) return this.append(values);
+        throw e;
+      }
+      lastOffline = false;
+      const all = await this.rows();
+      const at = snapshot.findIndex(r => r.id === id);
+      return at < 0 ? all.length : at + 2;
+    },
   };
 
   async function change(number, kind, values) {
@@ -1496,9 +1521,9 @@ export function runScreen(root, project, screen, store, opts) {
         if (!(await opts.confirm(t(`حذف ${rows.length} صفوف؟ تصعد الصفوف التي بعدها.`, `Delete ${rows.length} rows? The rows below move up.`)))) return;
         try {
           const now = await store.rows();
-          const records = [...rows].sort((a, b) => a - b).filter(n => now[n - 1]).map(n => recordOf(now[n - 1]));
+          const gone = [...rows].sort((a, b) => a - b).filter(n => now[n - 1]);
           for (const n of rows.sort((a, b) => b - a)) await store.delete(n);
-          remember({ kind: "removed", records });
+          remember({ kind: "removed", rows: gone, records: gone.map(n => recordOf(now[n - 1])) });
           picked.clear(); showPickBar(); clearForm();
           saved(t(`تم حذف ${rows.length} صفوف`, `${rows.length} rows deleted`));
           await reloadTables();
@@ -1520,6 +1545,8 @@ export function runScreen(root, project, screen, store, opts) {
   const recordOf = row => Object.fromEntries((row || []).map((v, i) => [i, v ?? ""]));
   const holds = (rows, numbers, records) => numbers.length === records.length &&
     numbers.every((n, i) => rows[n - 1] && Object.entries(records[i]).every(([col, v]) => normalize(rows[n - 1][col] ?? "") === normalize(v)));
+  // Back in the row it was in (stores that can't insert add it at the end).
+  const putBack = (n, record) => store.insert ? store.insert(n, record) : store.append(record);
   const deleteAll = async numbers => { for (const n of [...new Set(numbers)].sort((a, b) => b - a)) await store.delete(n); };
   function remember(change) { undoStack.push(change); if (undoStack.length > 50) undoStack.shift(); redoStack.length = 0; }
   function offerUndo(message, rows, records) { remember({ kind: "added", rows, records }); saved(message); }
@@ -1537,7 +1564,7 @@ export function runScreen(root, project, screen, store, opts) {
         ok = holds(rows, [change.row], [redo ? change.before : change.after]);
         if (ok) await store.update(change.row, redo ? change.after : change.before);
       } else if (change.kind === "removed") {
-        if (!redo) { change.restored = []; for (const r of change.records) change.restored.push(await store.append(r)); }
+        if (!redo) { change.restored = []; for (let i = 0; i < change.records.length; i++) change.restored.push(await putBack(change.rows[i], change.records[i])); }
         else { ok = holds(rows, change.restored, change.records); if (ok) await deleteAll(change.restored); }
       }
       if (ok) (redo ? undoStack : redoStack).push(change); else (redo ? undoStack : redoStack).length = 0;
@@ -1950,7 +1977,7 @@ export function runScreen(root, project, screen, store, opts) {
         if (!(await opts.confirm(t(`حذف الصف ${row}؟ تصعد الصفوف التي بعده.`, `Delete row ${row}? The rows below move up.`)))) return;
         const old = (await store.rows())[row - 1];
         await store.delete(row);
-        if (old) remember({ kind: "removed", records: [recordOf(old)] });
+        if (old) remember({ kind: "removed", rows: [row], records: [recordOf(old)] });
         clearForm();
         saved(t(`تم حذف الصف ${row}`, `Row ${row} deleted`));
       }

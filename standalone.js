@@ -177,6 +177,10 @@ export async function runStandalone(CONFIG, ICON) {
         await save(rows);
       },
       async delete(number) { const rows = await load(); if (!rows[number - 2]) throw fail("app-gone"); rows.splice(number - 2, 1); await save(rows); },
+      async insert(number, values) {
+        const rows = await load(), at = Math.min(Math.max(number - 2, 0), rows.length);
+        rows.splice(at, 0, cells(values)); await save(rows); return at + 2;
+      },
       async savePhoto(name, jpeg) { await op("photos", "readwrite", s => s.put(jpeg, name)); },
       async loadPhoto(name) {
         if (!urls.has(name)) {
