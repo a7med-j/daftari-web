@@ -529,6 +529,38 @@ export function lockSettings({ appId, uid, security, t, lang, onSaved }) {
   document.body.append(cover);
 }
 
+// ---- Symbols on buttons (Material icons, as in the Android app) ----
+
+const ICON_PATHS = {
+  undo: "M12.5 8c-2.65 0-5.05.99-6.9 2.6L2 7v9h9l-3.62-3.62c1.39-1.16 3.16-1.88 5.12-1.88 3.54 0 6.55 2.31 7.6 5.5l2.37-.78C21.08 11.03 17.15 8 12.5 8z",
+  redo: "M18.4 10.6C16.55 8.99 14.15 8 11.5 8c-4.65 0-8.58 3.03-9.96 7.22L3.9 16c1.05-3.19 4.05-5.5 7.6-5.5 1.95 0 3.73.72 5.12 1.88L13 16h9V7l-3.6 3.6z",
+  save: "M17 3H5c-1.11 0-2 .9-2 2v14c0 1.1.89 2 2 2h14c1.1 0 2-.9 2-2V7l-4-4zm-5 16c-1.66 0-3-1.34-3-3s1.34-3 3-3 3 1.34 3 3-1.34 3-3 3zm3-10H5V5h10v4z",
+  add: "M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6v2z",
+  search: "M15.5 14h-.79l-.28-.27C15.41 12.59 16 11.11 16 9.5 16 5.91 13.09 3 9.5 3S3 5.91 3 9.5 5.91 16 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z",
+  edit: "M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zM20.71 7.04c.39-.39.39-1.02 0-1.41l-2.34-2.34c-.39-.39-1.02-.39-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z",
+  delete: "M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z",
+  clear: "M5 13h14v-2H5v2zm-2 4h14v-2H3v2zM7 7v2h14V7H7z",
+  back: "M20 11H7.83l5.59-5.59L12 4l-8 8 8 8 1.41-1.41L7.83 13H20v-2z",
+  pdf: "M14 2H6c-1.1 0-1.99.9-1.99 2L4 20c0 1.1.89 2 1.99 2H18c1.1 0 2-.9 2-2V8l-6-6zm2 16H8v-2h8v2zm0-4H8v-2h8v2zm-3-5V3.5L18.5 9H13z",
+  share: "M18 16.08c-.76 0-1.44.3-1.96.77L8.91 12.7c.05-.23.09-.46.09-.7s-.04-.47-.09-.7l7.05-4.11c.54.5 1.25.81 2.04.81 1.66 0 3-1.34 3-3s-1.34-3-3-3-3 1.34-3 3c0 .24.04.47.09.7L8.04 9.81C7.5 9.31 6.79 9 6 9c-1.66 0-3 1.34-3 3s1.34 3 3 3c.79 0 1.5-.31 2.04-.81l7.12 4.16c-.05.21-.08.43-.08.65 0 1.61 1.31 2.92 2.92 2.92 1.61 0 2.92-1.31 2.92-2.92s-1.31-2.92-2.92-2.92z",
+  close: "M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z",
+};
+/** A button's symbol as an SVG element, or null; undo, redo and back are mirrored in right-to-left apps (as on Android). */
+function buttonIcon(name, color, size, rtl) {
+  const d = ICON_PATHS[name];
+  if (!d) return null;
+  const ns = "http://www.w3.org/2000/svg";
+  const svg = document.createElementNS(ns, "svg");
+  svg.setAttribute("viewBox", "0 0 24 24");
+  svg.setAttribute("width", String(size)); svg.setAttribute("height", String(size));
+  svg.style.flex = "none";
+  if (rtl && ["undo", "redo", "back"].includes(name)) svg.style.transform = "scaleX(-1)";
+  const path = document.createElementNS(ns, "path");
+  path.setAttribute("d", d); path.setAttribute("fill", color || "currentColor");
+  svg.append(path);
+  return svg;
+}
+
 // ---- The app's standard ☰ menu (chosen by its owner when exporting or publishing; see AppMenu) ----
 
 const MENU_ITEMS = [
@@ -1463,7 +1495,10 @@ export function runScreen(root, project, screen, store, opts) {
         const rows = [...picked];
         if (!(await opts.confirm(t(`حذف ${rows.length} صفوف؟ تصعد الصفوف التي بعدها.`, `Delete ${rows.length} rows? The rows below move up.`)))) return;
         try {
+          const now = await store.rows();
+          const records = [...rows].sort((a, b) => a - b).filter(n => now[n - 1]).map(n => recordOf(now[n - 1]));
           for (const n of rows.sort((a, b) => b - a)) await store.delete(n);
+          remember({ kind: "removed", records });
           picked.clear(); showPickBar(); clearForm();
           saved(t(`تم حذف ${rows.length} صفوف`, `${rows.length} rows deleted`));
           await reloadTables();
@@ -1475,31 +1510,41 @@ export function runScreen(root, project, screen, store, opts) {
   // Column widths each person drags in tables, kept in this browser per app and table.
   const widthKey = id => `waraqa-colw:${project.id || project.name}:${id}`;
   function tableWidths(id) { try { return JSON.parse(localStorage.getItem(widthKey(id)) || "{}") || {}; } catch (e) { return {}; } }
-  function setTableWidth(id, k, w) {
-    const next = tableWidths(id);
-    if (w > 0) next[k] = w; else delete next[k];
-    try { localStorage.setItem(widthKey(id), JSON.stringify(next)); } catch (e) {}
+  function setTableWidths(id, all) {
+    try { localStorage.setItem(widthKey(id), JSON.stringify(all)); } catch (e) {}
   }
   function togglePicked(n) { picked.has(n) ? picked.delete(n) : picked.add(n); showPickBar(); tables.forEach(draw => draw()); }
-  /** "Undo" for records just added: deletes them again if they still hold what was saved. */
-  // The last save on this screen, for an "Undo" button: the rows it added and what they hold.
-  let lastSave = null;
-  function offerUndo(message, rows, record, moving) {
-    lastSave = { rows, record, moving };
-    saved(message);
-  }
-  /** Deletes the records of the last save again — only rows that still hold what was saved. */
-  async function undoLastSave() {
-    if (!lastSave || !store) return toast(t("لا يوجد حفظ للتراجع عنه.", "Nothing saved to undo."));
-    const { rows, record, moving } = lastSave;
+  // Changes to this screen's records, for the app's ↶ / ↷ buttons (like the editor's). A change is
+  // only taken back or redone while its rows still hold what it left there.
+  const undoStack = [], redoStack = [];
+  const recordOf = row => Object.fromEntries((row || []).map((v, i) => [i, v ?? ""]));
+  const holds = (rows, numbers, records) => numbers.length === records.length &&
+    numbers.every((n, i) => rows[n - 1] && Object.entries(records[i]).every(([col, v]) => normalize(rows[n - 1][col] ?? "") === normalize(v)));
+  const deleteAll = async numbers => { for (const n of [...new Set(numbers)].sort((a, b) => b - a)) await store.delete(n); };
+  function remember(change) { undoStack.push(change); if (undoStack.length > 50) undoStack.shift(); redoStack.length = 0; }
+  function offerUndo(message, rows, records) { remember({ kind: "added", rows, records }); saved(message); }
+  async function undoOrRedo(redo) {
+    if (!store) return;
+    const change = (redo ? redoStack : undoStack).pop();
+    if (!change) return toast(redo ? t("لا يوجد ما يُعاد.", "Nothing to redo.") : t("لا يوجد ما يُتراجع عنه.", "Nothing to undo."));
     try {
-      const now = await store.rows();
-      const same = rows.filter(n => now[n - 1] && Object.entries(record).every(([col, v]) => Number(col) === moving || normalize(now[n - 1][col] ?? "") === normalize(v)));
-      for (const n of [...same].sort((a, b) => b - a)) await store.delete(n);
-      lastSave = null;
+      const rows = await store.rows();
+      let ok = true;
+      if (change.kind === "added") {
+        if (!redo) { ok = holds(rows, change.rows, change.records); if (ok) await deleteAll(change.rows); }
+        else { change.rows = []; for (const r of change.records) change.rows.push(await store.append(r)); }
+      } else if (change.kind === "changed") {
+        ok = holds(rows, [change.row], [redo ? change.before : change.after]);
+        if (ok) await store.update(change.row, redo ? change.after : change.before);
+      } else if (change.kind === "removed") {
+        if (!redo) { change.restored = []; for (const r of change.records) change.restored.push(await store.append(r)); }
+        else { ok = holds(rows, change.restored, change.records); if (ok) await deleteAll(change.restored); }
+      }
+      if (ok) (redo ? undoStack : redoStack).push(change); else (redo ? undoStack : redoStack).length = 0;
+      toast(!ok ? t("تغيّرت هذه السجلات بعد ذلك، فلا يمكن ", "These records changed since, so it can't be ") + (redo ? t("إعادتها.", "redone.") : t("التراجع عنها.", "undone."))
+        : redo ? t("تمت الإعادة ↷", "Redone ↷") : t("تم التراجع ↶", "Undone ↶"));
       state.currentRow = null;
-      toast(same.length === rows.length ? t(`تم التراجع: حُذف ${same.length} سجل`, `Undone: ${same.length} records deleted`)
-        : t(`تم حذف ${same.length} من ${rows.length}؛ الباقي تغيّر بعد الحفظ فلم يُحذف.`, `Deleted ${same.length} of ${rows.length}; the others changed after saving and were kept.`));
+      clearForm();
       await reloadTables();
     } catch (e) { toast(opts.errorText(e)); }
   }
@@ -1798,7 +1843,7 @@ export function runScreen(root, project, screen, store, opts) {
     if (action === "pdfTable") return tableReport();
     if (action === "pdfScreen") return screenReport();
     // Buttons the designer placed instead of the app's own close, lock and sign-out buttons.
-    if (action === "undo") return mayDelete ? undoLastSave() : toast(t("غير مصرّح لك بالحذف.", "You can't delete."));
+    if (action === "undo" || action === "redo") return mayDelete ? undoOrRedo(action === "redo") : toast(t("غير مصرّح لك بالحذف.", "You can't delete."));
     if (action === "closeApp") return opts.onClose ? opts.onClose() : toast(t("الإغلاق يعمل في التطبيق المنشور.", "Closing works in the published app."));
     if (action === "lockSettings") return opts.onLockSettings ? opts.onLockSettings() : toast(t("قفل التطبيق يعمل بعد تسجيل الدخول في التطبيق المنشور.", "The app lock works once signed in to the published app."));
     if (action === "signOut") return opts.onSignOut ? opts.onSignOut() : toast(t("تسجيل الخروج يعمل في التطبيق المنشور.", "Signing out works in the published app."));
@@ -1829,8 +1874,13 @@ export function runScreen(root, project, screen, store, opts) {
         const found = searchAll(rows, { [keyCol]: keyValue })[0];
         const repeated = duplicateError(rows, found || null);
         if (repeated) return toast(repeated);
-        if (found) { await store.update(found, formValues()); saved(t(`تم تحديث سجل «${keyValue}» ✓`, `"${keyValue}" updated ✓`)); }
-        else { const row = await store.append(formValues()); saved(t(`تمت إضافة «${keyValue}» في الصف ${row} ✓`, `"${keyValue}" added in row ${row} ✓`)); }
+        if (found) {
+          const after = formValues();
+          await store.update(found, after);
+          remember({ kind: "changed", row: found, before: Object.fromEntries(Object.keys(after).map(k => [k, rows[found - 1]?.[k] ?? ""])), after });
+          saved(t(`تم تحديث سجل «${keyValue}» ✓`, `"${keyValue}" updated ✓`));
+        }
+        else { const record = formValues(); const row = await store.append(record); remember({ kind: "added", rows: [row], records: [record] }); saved(t(`تمت إضافة «${keyValue}» في الصف ${row} ✓`, `"${keyValue}" added in row ${row} ✓`)); }
         clearForm();
       } else if (action === "addRow") {
         const missing = missingRequired();
@@ -1852,16 +1902,17 @@ export function runScreen(root, project, screen, store, opts) {
         const dateField = byName(button ? prop(button, "repeatDateField") : "");
         const dateCol = dateField ? binds.find(([b]) => b === dateField)?.[1] : null;
         const first = formValues();
-        const addedRows = [];
+        const addedRows = [], addedRecords = [];
         for (let i = 0; i < times; i++) {
           const record = i === 0 || dateCol == null ? first : { ...first, [dateCol]: addPeriods(first[dateCol] ?? "", prop(dateField, "dateFormat"), i) ?? first[dateCol] };
           addedRows.push(await store.append(record));
+          addedRecords.push(record);
         }
         clearForm();
         // A mistake (say, too many months) can be taken back at once.
         offerUndo(times > 1 ? t(`تمت إضافة ${times} سجلات ✓`, `${times} records added ✓`)
           : t(`تمت إضافة الصف رقم ${addedRows[0]} ✓`, `Row ${addedRows[0]} added ✓`) + (assigned.length ? " — " + assigned.join("، ") : ""),
-          addedRows, first, times > 1 && dateCol != null ? dateCol : null);
+          addedRows, addedRecords);
       } else if (action === "search") {
         const field = button ? prop(button, "searchField") : "";
         const mode = (button && prop(button, "matchMode")) || "exact";
@@ -1885,16 +1936,21 @@ export function runScreen(root, project, screen, store, opts) {
         const missing = missingRequired();
         if (missing.length) return toast(t("املأ الحقول المطلوبة: ", "Fill in the required fields: ") + missing.join("، "));
         if (rangeError()) return toast(rangeError());
-        const repeated = duplicateError(await store.rows(), row);
+        const now = await store.rows();
+        const repeated = duplicateError(now, row);
         if (repeated) return toast(repeated);
-        await store.update(row, formValues());
+        const after = formValues();
+        await store.update(row, after);
+        remember({ kind: "changed", row, before: Object.fromEntries(Object.keys(after).map(k => [k, now[row - 1]?.[k] ?? ""])), after });
         state.filledSnapshot = formValues();
         saved(t(`تم حفظ التعديل على الصف ${row} ✓`, `Row ${row} updated ✓`));
       } else if (action === "deleteRow") {
         const row = state.currentRow;
         if (row == null) return toast(t("ابحث عن الصف أولًا ثم احذفه.", "Search for the row first, then delete it."));
         if (!(await opts.confirm(t(`حذف الصف ${row}؟ تصعد الصفوف التي بعده.`, `Delete row ${row}? The rows below move up.`)))) return;
+        const old = (await store.rows())[row - 1];
         await store.delete(row);
+        if (old) remember({ kind: "removed", records: [recordOf(old)] });
         clearForm();
         saved(t(`تم حذف الصف ${row}`, `Row ${row} deleted`));
       }
@@ -2073,8 +2129,12 @@ export function runScreen(root, project, screen, store, opts) {
         return el;
       }
       case "BUTTON": {
-        const el = h("button", { ...chrome(c), ...style, width: "100%", height: "100%", cursor: enabled ? "pointer" : "default", display: "flex", alignItems: "center", justifyContent: justify(prop(c, "textAlign")) },
-          { disabled: !enabled, onclick: () => perform(prop(c, "action"), prop(c, "targetScreen"), c) }, c.text);
+        const el = h("button", { ...chrome(c), ...style, width: "100%", height: "100%", cursor: enabled ? "pointer" : "default", display: "flex", alignItems: "center", justifyContent: justify(prop(c, "textAlign")), gap: "4px" },
+          { disabled: !enabled, onclick: () => perform(prop(c, "action"), prop(c, "targetScreen"), c) });
+        // A symbol (the same arrows as the editor's undo/redo), beside the text or alone.
+        const icon = buttonIcon(prop(c, "buttonIcon"), style.color, Math.max(16, num(c, "fontSize") * 1.4), lang !== "en");
+        if (icon) el.append(icon);
+        if (c.text) el.append(c.text);
         return el;
       }
       case "TEXT_FIELD": {
@@ -2352,7 +2412,7 @@ export function runScreen(root, project, screen, store, opts) {
             onLongPick: line => { const number = numbers[line]; if (number >= 2) togglePicked(number); },
           } : null, bool(c, "resizeColumns") && {
             widths: tableWidths(c.id),
-            onWidth: (k, w) => { setTableWidth(c.id, k, w); draw(); },
+            onWidths: all => { setTableWidths(c.id, all); draw(); },
           }));
         };
         draw();
@@ -2516,30 +2576,45 @@ function drawTable(c, style, grid, currentRow, onPick, sort = null, ticks = null
     const th = cell((headers[k] ?? "") + arrow, true, { ...(sort ? { cursor: "pointer", userSelect: "none" } : {}), ...width, position: "relative" });
     if (sort) { th.title = "فرز"; th.addEventListener("click", () => sort.onSort(k)); }
     // Drag the header's edge to widen or narrow the column; a double tap makes it automatic again.
-    if (sizing?.onWidth && !vertical) {
-      const grip = h("span", { position: "absolute", top: "0", bottom: "0", insetInlineEnd: "0", width: "12px", cursor: "col-resize", touchAction: "none",
+    if (sizing?.onWidths && !vertical) {
+      const grip = h("span", { position: "absolute", top: "0", bottom: "0", width: "12px", cursor: "col-resize", touchAction: "none",
         display: "flex", alignItems: "center", justifyContent: "center" }, {}, h("span", { width: "2px", height: "50%", background: "rgba(255,255,255,.6)" }));
       let startX = 0, startW = 0, scale = 1, dragging = false;
-      const rtl = getComputedStyle(th).direction === "rtl";
+      // The table's direction (not the header text's): which way a drag widens the column.
+      const rtl = () => getComputedStyle(table).direction === "rtl";
       grip.addEventListener("click", e => e.stopPropagation());
-      grip.addEventListener("dblclick", e => { e.stopPropagation(); sizing.onWidth(k, 0); });
+      grip.addEventListener("dblclick", e => { e.stopPropagation(); sizing.onWidths({}); });
+      const setCol = (col, w) => {
+        for (const el of table.querySelectorAll(`[data-col="${col}"]`)) Object.assign(el.style, { width: w + "px", minWidth: w + "px", maxWidth: w + "px" });
+      };
       grip.addEventListener("pointerdown", e => {
         e.stopPropagation(); e.preventDefault();
         const box = th.getBoundingClientRect();
         scale = box.width / (th.offsetWidth || box.width || 1) || 1;
+        // Every column keeps the width it has now, so only the dragged one moves.
+        const heads = [...table.querySelectorAll("th[data-col]")];
+        const now = heads.map(x => [x.dataset.col, x.offsetWidth]);
+        table.style.width = "auto"; table.style.tableLayout = "fixed";
+        for (const [col, w] of now) { setCol(col, w); heads.find(x => x.dataset.col === col).dataset.w = String(w); }
         startX = e.clientX; startW = th.offsetWidth; dragging = true;
         grip.setPointerCapture(e.pointerId);
       });
       grip.addEventListener("pointermove", e => {
         if (!dragging) return;
-        const w = Math.max(40, Math.min(600, startW + ((e.clientX - startX) / scale) * (rtl ? -1 : 1)));
-        for (const el of [th, ...table.querySelectorAll(`[data-col="${k}"]`)]) Object.assign(el.style, { width: w + "px", minWidth: w + "px", maxWidth: w + "px" });
-        table.style.width = "auto"; table.style.tableLayout = "fixed";
+        const w = Math.max(40, Math.min(600, startW + ((e.clientX - startX) / scale) * (rtl() ? -1 : 1)));
+        setCol(k, w);
         th.dataset.w = String(Math.round(w));
       });
-      const end = () => { if (!dragging) return; dragging = false; if (th.dataset.w) sizing.onWidth(k, Number(th.dataset.w)); };
+      const end = () => {
+        if (!dragging) return;
+        dragging = false;
+        sizing.onWidths(Object.fromEntries([...table.querySelectorAll("th[data-col]")].map(x => [x.dataset.col, Number(x.dataset.w || x.offsetWidth)])));
+      };
       grip.addEventListener("pointerup", end);
       grip.addEventListener("pointercancel", end);
+      // On the column's end edge, by the table's direction (the header's own text may run the other way).
+      const place = () => { const r = rtl(); grip.style.left = r ? "0" : ""; grip.style.right = r ? "" : "0"; };
+      place(); setTimeout(place, 0);
       th.append(grip);
     }
     return th;
