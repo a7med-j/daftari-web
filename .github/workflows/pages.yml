@@ -22,7 +22,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Check the scripts parse
-        run: node --check app.js && node --check render.js && node --check config.js
+        # As ES modules (as the browser loads them), so an error like a name declared twice is caught.
+        run: for f in app.js render.js standalone.js config.js; do cp "$f" "/tmp/${f%.js}.mjs" && node --check "/tmp/${f%.js}.mjs" || exit 1; done
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with:
