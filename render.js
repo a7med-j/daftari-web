@@ -1287,7 +1287,7 @@ export function labelComponentFor(screen, input) {
 }
 
 export function withAddedFields(screen, headers) {
-  const button = screen.components.find(c => c.type === "BUTTON" && prop(c, "action") === "addField");
+  const button = screen.components.find(c => runsAction(c, "addField"));
   if (!button) return screen;
   const bound = bindings(screen, headers);
   const wanted = prop(button, "templateField");
@@ -1320,7 +1320,7 @@ export function withAddedFields(screen, headers) {
 
 /** Whether some screen of the project has a button doing `action` (then the app adds none of its own). */
 export function designedAction(project, action) {
-  return (project.screens || []).some(s => s.components.some(c => c.type === "BUTTON" && prop(c, "action") === action));
+  return (project.screens || []).some(s => s.components.some(c => runsAction(c, action)));
 }
 
 /** Column index of each input bound to a header, like FormLogic.bindings. */
@@ -1437,6 +1437,97 @@ function h(tag, style = {}, attrs = {}, ...children) {
 }
 
 const justify = align => ({ center: "center", end: "flex-end" }[align] || "flex-start");
+
+// ---- Button blocks (see Logic.kt): what happens, in order, when a button is pressed ----
+
+const LOGIC_LAST = new Set(["openScreen", "back", "closeApp", "signOut", "lockSettings", "deleteRow", "chooseColumns", "addField"]);
+export const LOGIC_YES = new Set(["true", "نعم", "yes", "1", "صح", "✓"]);
+
+/** The blocks kept in a button's "logic" property; damaged text reads as none. */
+export function logicOf(c) {
+  const text = (c.properties || {}).logic;
+  if (!text) return [];
+  try { const steps = JSON.parse(text); return Array.isArray(steps) ? steps : []; } catch (e) { return []; }
+}
+
+/** Every action a button's blocks run, nested ones included. */
+function logicActions(steps, into = new Set()) {
+  for (const s of steps || []) { if (s.kind === "action") into.add(s.action); logicActions(s.then, into); logicActions(s.otherwise, into); }
+  return into;
+}
+
+/** Whether a button runs action: its single action, or one of its blocks when it has some. */
+export function runsAction(c, action) {
+  if (c.type !== "BUTTON") return false;
+  const blocks = logicOf(c);
+  return blocks.length ? logicActions(blocks).has(action) : prop(c, "action") === action;
+}
+
+const logicNumber = text => {
+  const s = toWestern(text).trim().replace(/[٫,]/g, ".");
+  if (s === "") return null;
+  const n = Number(s);
+  return Number.isFinite(n) ? n : null;
+};
+
+/** A block's value: a calculation after "=", otherwise the text with each [name] replaced by that field's value. */
+export function logicResolve(value, valueOf) {
+  const text = String(value ?? "");
+  const trimmed = text.trimStart();
+  if (trimmed.startsWith("=")) {
+    const v = evaluateFormula(trimmed.slice(1), name => valueOf(name) ?? "");
+    return v == null ? "؟" : formatNumber(v);
+  }
+  return text.replace(/\[([^\[\]]+)\]/g, (m, name) => valueOf(name.trim()) ?? m);
+}
+
+/** Whether left relates to right as op says: as numbers when both are, else as text (case and spacing ignored). */
+export function logicTest(op, left, right) {
+  const a = normalize(left), b = normalize(right);
+  const x = logicNumber(left), y = logicNumber(right);
+  const numeric = x != null && y != null;
+  const cmp = () => (numeric ? (x < y ? -1 : x > y ? 1 : 0) : a < b ? -1 : a > b ? 1 : 0);
+  switch (op) {
+    case "eq": return numeric ? x === y : a === b;
+    case "ne": return numeric ? x !== y : a !== b;
+    case "gt": return cmp() > 0;
+    case "lt": return cmp() < 0;
+    case "ge": return cmp() >= 0;
+    case "le": return cmp() <= 0;
+    case "contains": return b !== "" && a.includes(b);
+    case "empty": return a === "";
+    case "notEmpty": return a !== "";
+    default: return false;
+  }
+}
+
+/**
+ * Runs blocks in order; false when one stopped them. host: { get(name) -> value or null, set(name, value),
+ * show(name, shown), say(text) -> Promise, ask(text) -> Promise<bool>, act(action, target) -> Promise<bool> }.
+ */
+export async function runLogic(steps, host) {
+  const valueOf = name => host.get(name);
+  for (const step of steps || []) {
+    switch (step.kind) {
+      case "set": host.set(step.field || "", logicResolve(step.value, valueOf)); break;
+      case "message": await host.say(logicResolve(step.value, valueOf)); break;
+      case "show": host.show(step.field || "", true); break;
+      case "hide": host.show(step.field || "", false); break;
+      case "confirm": if (!(await host.ask(logicResolve(step.value, valueOf)))) return false; break;
+      case "action":
+        if (!(await host.act(step.action || "", step.target || ""))) return false;
+        if (LOGIC_LAST.has(step.action)) return false;
+        break;
+      case "stop": return false;
+      case "if": {
+        const holds = logicTest(step.op || "", host.get(step.field || "") ?? "", logicResolve(step.value, valueOf));
+        if (!(await runLogic(holds ? step.then : step.otherwise, host))) return false;
+        break;
+      }
+    }
+  }
+  return true;
+}
 
 // ---- Runner ----
 
@@ -1586,11 +1677,16 @@ export function runScreen(root, project, screen, store, opts) {
   };
   // "Show only when" conditions; hidden fields save nothing.
   const byName = name => name && screen.components.find(o => normalize(o.name) === normalize(name));
+  // What buttons' blocks did on this screen: label texts they set and components they hid.
+  const logicTexts = {}; // label id -> text
+  const logicHidden = new Set();
+  const labelSetters = {}; // label id -> function(text)
   const isShown = c => {
+    if (logicHidden.has(c.id)) return false;
     const source = byName(prop(c, "showIfField"));
     if (!source) return true;
     const wanted = prop(c, "showIfValues").split(/[,،]/).map(normalize).filter(Boolean);
-    const actual = normalize(source.type === "LABEL" ? source.text : toExcel(source));
+    const actual = normalize(source.type === "LABEL" ? logicTexts[source.id] ?? source.text : toExcel(source));
     return wanted.length ? wanted.includes(actual) : actual !== "";
   };
   // Undo/redo buttons may show only while there is something to undo / redo.
@@ -1721,7 +1817,7 @@ export function runScreen(root, project, screen, store, opts) {
     // The key of a "save or update" button: an existing row with this key is shown to be updated.
     const keyCol = binds.find(([b]) => b === c)?.[1];
     if (!filling && keyCol != null && state.sheetRows && String(v).trim() &&
-        screen.components.some(o => prop(o, "action") === "upsertRow" && normalize(prop(o, "searchField")) === normalize(c.name))) {
+        screen.components.some(o => runsAction(o, "upsertRow") && normalize(prop(o, "searchField")) === normalize(c.name))) {
       const found = searchAll(state.sheetRows, { [keyCol]: v })[0];
       if (found) { fill(state.sheetRows[found - 1]); state.currentRow = found; state.lastCriteria = null; state.filledSnapshot = formValues(); }
       else if (state.currentRow != null) {
@@ -1796,7 +1892,7 @@ export function runScreen(root, project, screen, store, opts) {
       s.rows(true).then(show).catch(() => {});
     }
     const listsFromSheet = screen.components.some(c => c.type === "CHART" || prop(c, "optionsColumn") || prop(c, "scan") === "record" || (c.type === "LABEL" && prop(c, "stat"))
-      || prop(c, "action") === "upsertRow" || prop(c, "lookupField"));
+      || runsAction(c, "upsertRow") || prop(c, "lookupField"));
     if (!tables.length && !listsFromSheet) { state.sheetRows = null; return; } // suggestions read the sheet again when needed
     const show = rows => {
       state.sheetRows = rows;
@@ -1863,13 +1959,15 @@ export function runScreen(root, project, screen, store, opts) {
   }
 
   async function perform(action, target, button) {
+    // A failure says why and returns false, so a button's blocks stop there.
+    const fail = message => { toast(message); return false; };
     if (!action) return;
-    if (action === "clear") return clearForm();
-    if (action === "openScreen") return opts.openScreen ? opts.openScreen(target) : null;
-    if (action === "back") return opts.back ? opts.back() : null;
+    if (action === "clear") { clearForm(); return true; }
+    if (action === "openScreen") { if (!opts.openScreen) return false; opts.openScreen(target); return true; }
+    if (action === "back") { if (!opts.back) return false; opts.back(); return true; }
     // The app owner's choices: who exports files, who deletes records.
-    if (opts.canExport === false && ["pdfRecord", "pdfTable", "excelTable", "pdfScreen"].includes(action)) return toast(t("تصدير الملفات متاح لصاحب التطبيق فقط.", "Exporting files is for the app's owner only."));
-    if (action === "deleteRow" && opts.canEdit !== false && opts.canDelete === false) return toast(t("حذف السجلات متاح لصاحب التطبيق فقط.", "Deleting records is for the app's owner only."));
+    if (opts.canExport === false && ["pdfRecord", "pdfTable", "excelTable", "pdfScreen"].includes(action)) return fail(t("تصدير الملفات متاح لصاحب التطبيق فقط.", "Exporting files is for the app's owner only."));
+    if (action === "deleteRow" && opts.canEdit !== false && opts.canDelete === false) return fail(t("حذف السجلات متاح لصاحب التطبيق فقط.", "Deleting records is for the app's owner only."));
     if (action === "pdfRecord") return recordReport();
     if (action === "pdfTable") return tableReport();
     if (action === "pdfScreen") return screenReport();
@@ -1878,33 +1976,33 @@ export function runScreen(root, project, screen, store, opts) {
     if (action === "closeApp") return opts.onClose ? opts.onClose() : toast(t("الإغلاق يعمل في التطبيق المنشور.", "Closing works in the published app."));
     if (action === "lockSettings") return opts.onLockSettings ? opts.onLockSettings() : toast(t("قفل التطبيق يعمل بعد تسجيل الدخول في التطبيق المنشور.", "The app lock works once signed in to the published app."));
     if (action === "signOut") return opts.onSignOut ? opts.onSignOut() : toast(t("تسجيل الخروج يعمل في التطبيق المنشور.", "Signing out works in the published app."));
-    if (action === "addField") return toast(opts.canEdit === false ? t("غير مصرّح لك بالإضافة.", "You can't add.")
+    if (action === "addField") return fail(opts.canEdit === false ? t("غير مصرّح لك بالإضافة.", "You can't add.")
       : t("إضافة الحقول تتم من تطبيق ورقة: يضيفها صاحب التطبيق ثم يعيد النشر.", "Fields are added in the Waraqa app: its owner adds them, then publishes again."));
     if (action === "excelTable") return exportTable();
     if (action === "chooseColumns") {
       const table = mainTable();
       return table ? chooseColumns(table) : toast(t("أضف جدولًا مصدره ملف Excel في هذه الشاشة.", "Add a table showing an Excel file on this screen."));
     }
-    if (!store) return toast(t("هذا التطبيق غير مرتبط ببيانات.", "This app has no data source."));
+    if (!store) return fail(t("هذا التطبيق غير مرتبط ببيانات.", "This app has no data source."));
     const writes = ["addRow", "upsertRow", "updateRow", "deleteRow"].includes(action);
-    if (writes && opts.canEdit === false) return noAccess();
-    if (!binds.length) return toast(t("لا يوجد حقل مرتبط بعمود.", "No field is linked to a column."));
-    if (state.working) return;
+    if (writes && opts.canEdit === false) { noAccess(); return false; }
+    if (!binds.length) return fail(t("لا يوجد حقل مرتبط بعمود.", "No field is linked to a column."));
+    if (state.working) return false;
     state.working = true;
     try {
       if (action === "upsertRow") {
         const key = byName(button ? prop(button, "searchField") : "");
         const keyCol = key && binds.find(([b]) => b === key)?.[1];
-        if (keyCol == null) return toast(t("اختر في خصائص الزر «الحقل المميّز للسجل»، وهو الحقل الذي لا يتكرر في كل صف (مثل الرقم أو الكود).", "Choose the button's \"Key field of the record\": the field that is different in every row (like a number or code)."));
+        if (keyCol == null) return fail(t("اختر في خصائص الزر «الحقل المميّز للسجل»، وهو الحقل الذي لا يتكرر في كل صف (مثل الرقم أو الكود).", "Choose the button's \"Key field of the record\": the field that is different in every row (like a number or code)."));
         const keyValue = toExcel(key);
-        if (!String(keyValue).trim()) return toast(t("اختر قيمة الحقل المميّز أولًا.", "Fill in the identifying field first."));
+        if (!String(keyValue).trim()) return fail(t("اختر قيمة الحقل المميّز أولًا.", "Fill in the identifying field first."));
         const missing = missingRequired();
-        if (missing.length) return toast(t("املأ الحقول المطلوبة: ", "Fill in the required fields: ") + missing.join("، "));
-        if (rangeError()) return toast(rangeError());
+        if (missing.length) return fail(t("املأ الحقول المطلوبة: ", "Fill in the required fields: ") + missing.join("، "));
+        if (rangeError()) return fail(rangeError());
         const rows = await store.rows();
         const found = searchAll(rows, { [keyCol]: keyValue })[0];
         const repeated = duplicateError(rows, found || null);
-        if (repeated) return toast(repeated);
+        if (repeated) return fail(repeated);
         if (found) {
           const after = formValues();
           await store.update(found, after);
@@ -1915,11 +2013,11 @@ export function runScreen(root, project, screen, store, opts) {
         clearForm();
       } else if (action === "addRow") {
         const missing = missingRequired();
-        if (missing.length) return toast(t("املأ الحقول المطلوبة: ", "Fill in the required fields: ") + missing.join("، "));
-        if (rangeError()) return toast(rangeError());
-        if (Object.values(formValues()).every(v => !String(v).trim())) return toast(t("الحقول فارغة.", "The fields are empty."));
+        if (missing.length) return fail(t("املأ الحقول المطلوبة: ", "Fill in the required fields: ") + missing.join("، "));
+        if (rangeError()) return fail(rangeError());
+        if (Object.values(formValues()).every(v => !String(v).trim())) return fail(t("الحقول فارغة.", "The fields are empty."));
         const repeated = duplicateError(await store.rows(), null);
-        if (repeated) return toast(repeated);
+        if (repeated) return fail(repeated);
         // Serial numbers: one more than the largest already in the column.
         const numbered = binds.filter(([c]) => bool(c, "autoNumber") && !(values[c.id] || "").trim());
         const assigned = [];
@@ -1951,25 +2049,25 @@ export function runScreen(root, project, screen, store, opts) {
         const criteria = again ? state.lastCriteria : searchCriteria(field);
         state.resultsTarget = button ? prop(button, "targetScreen") : "";
         if (!Object.keys(criteria).length) {
-          return toast(field ? t(`اكتب قيمة في حقل «${field}» ثم اضغط بحث.`, `Type a value in "${field}", then search.`)
+          return fail(field ? t(`اكتب قيمة في حقل «${field}» ثم اضغط بحث.`, `Type a value in "${field}", then search.`)
             : t("اكتب قيمة في حقل أو أكثر ثم اضغط بحث.", "Type a value in one or more fields, then search."));
         }
         const rows = await store.rows();
         state.sheetRows = rows;
         state.lastCriteria = criteria;
         const found = searchAll(rows, criteria, mode);
-        if (!found.length) toast(t("لا توجد نتيجة مطابقة.", "No matching row."));
+        if (!found.length) return fail(t("لا توجد نتيجة مطابقة.", "No matching row."));
         else if (found.length === 1) openRecord(rows, found[0], state.resultsTarget);
-        else pickResult(rows, found);
+        else { pickResult(rows, found); return false; }
       } else if (action === "updateRow") {
         const row = state.currentRow;
-        if (row == null) return toast(t("ابحث عن الصف أولًا ثم عدّله.", "Search for the row first, then edit it."));
+        if (row == null) return fail(t("ابحث عن الصف أولًا ثم عدّله.", "Search for the row first, then edit it."));
         const missing = missingRequired();
-        if (missing.length) return toast(t("املأ الحقول المطلوبة: ", "Fill in the required fields: ") + missing.join("، "));
-        if (rangeError()) return toast(rangeError());
+        if (missing.length) return fail(t("املأ الحقول المطلوبة: ", "Fill in the required fields: ") + missing.join("، "));
+        if (rangeError()) return fail(rangeError());
         const now = await store.rows();
         const repeated = duplicateError(now, row);
-        if (repeated) return toast(repeated);
+        if (repeated) return fail(repeated);
         const after = formValues();
         await store.update(row, after);
         remember({ kind: "changed", row, before: Object.fromEntries(Object.keys(after).map(k => [k, now[row - 1]?.[k] ?? ""])), after });
@@ -1977,8 +2075,8 @@ export function runScreen(root, project, screen, store, opts) {
         saved(t(`تم حفظ التعديل على الصف ${row} ✓`, `Row ${row} updated ✓`));
       } else if (action === "deleteRow") {
         const row = state.currentRow;
-        if (row == null) return toast(t("ابحث عن الصف أولًا ثم احذفه.", "Search for the row first, then delete it."));
-        if (!(await opts.confirm(t(`حذف الصف ${row}؟ تصعد الصفوف التي بعده.`, `Delete row ${row}? The rows below move up.`)))) return;
+        if (row == null) return fail(t("ابحث عن الصف أولًا ثم احذفه.", "Search for the row first, then delete it."));
+        if (!(await opts.confirm(t(`حذف الصف ${row}؟ تصعد الصفوف التي بعده.`, `Delete row ${row}? The rows below move up.`)))) return false;
         const old = (await store.rows())[row - 1];
         await store.delete(row);
         if (old) remember({ kind: "removed", rows: [row], records: [recordOf(old)] });
@@ -1989,9 +2087,60 @@ export function runScreen(root, project, screen, store, opts) {
     } catch (e) {
       if (writes && String(e?.code || "").includes("permission-denied")) noAccess();
       else toast(opts.errorText(e));
+      return false;
     } finally {
       state.working = false;
     }
+  }
+
+
+  /** The value a block reads: as saved (checkboxes as نعم/لا), with calculations worked out now. */
+  const liveValue = c => {
+    const fresh = computeFormulas(screen, x => (x.type === "LABEL" ? logicTexts[x.id] ?? (prop(x, "stat") ? statRaw(x) ?? x.text : x.text) : values[x.id] ?? ""));
+    if (c.id in fresh) return fresh[c.id];
+    if (c.type === "LABEL") return logicTexts[c.id] ?? (prop(c, "stat") ? withStatistic(c.text || "", statRaw(c) ?? "") : computed[c.id] ?? withUserName(c.text, opts.user));
+    return toExcel(c);
+  };
+  /** A message or yes/no question from a button's blocks; resolves when answered (true = OK / yes). */
+  function logicDialog(text, question) {
+    return new Promise(resolve => {
+      const close = answer => { overlay.remove(); resolve(answer); };
+      const button = (label, color, answer) => h("button", { background: "none", border: "0", color, fontSize: "15px", cursor: "pointer", fontWeight: "bold", padding: "6px 4px" }, { onclick: () => close(answer) }, label);
+      const overlay = h("div", { position: "fixed", inset: "0", background: "#0008", display: "flex", alignItems: "center", justifyContent: "center", zIndex: "60" },
+        { dir: lang === "en" ? "ltr" : "rtl", onclick: e => { if (e.target === overlay) close(false); } },
+        h("div", { background: "#172C24", color: "#fff", borderRadius: "14px", padding: "18px 16px 10px", width: "min(92vw, 380px)" }, {},
+          h("div", { whiteSpace: "pre-wrap", fontSize: "15px", lineHeight: "1.6" }, { dir: "auto" }, text),
+          h("div", { display: "flex", gap: "16px", justifyContent: "flex-end", marginTop: "12px" }, {},
+            question ? button(t("لا", "No"), "#9FB5AA", false) : null,
+            button(question ? t("نعم", "Yes") : t("حسنًا", "OK"), "#20B879", true))));
+      document.body.append(overlay);
+    });
+  }
+  let runningBlocks = false;
+  /** Runs a button's blocks; a button without blocks does its single action. */
+  async function press(button) {
+    const blocks = logicOf(button);
+    if (!blocks.length) return perform(prop(button, "action"), prop(button, "targetScreen"), button);
+    if (runningBlocks) return;
+    runningBlocks = true;
+    const host = {
+      get: name => { const c = byName(name); return c ? liveValue(c) : null; },
+      set: (name, value) => {
+        const c = byName(name);
+        if (!c) return;
+        if (c.type === "LABEL") { logicTexts[c.id] = value; labelSetters[c.id]?.(value); }
+        else setValue(c, c.type === "CHECKBOX" ? String(LOGIC_YES.has(normalize(value))) : value);
+        recompute();
+      },
+      show: (name, shown) => { const c = byName(name); if (!c) return; shown ? logicHidden.delete(c.id) : logicHidden.add(c.id); refreshShown(); },
+      say: text => logicDialog(text, false),
+      ask: text => logicDialog(text, true),
+      // The blocks end once the app leaves this screen (a search can open its record elsewhere).
+      act: async (action, target) => (await perform(action, target, button)) !== false && page.isConnected,
+    };
+    try { await runLogic(blocks, host); }
+    catch (e) { toast(opts.errorText(e)); }
+    finally { runningBlocks = false; }
   }
 
   /** A member who may only look: says so, and offers to ask the owner for editing rights. */
@@ -2150,6 +2299,7 @@ export function runScreen(root, project, screen, store, opts) {
         const shownText = withUserName(c.text, opts.user);
         const text = h("div", { ...style, width: "100%", whiteSpace: "pre-wrap", ...(max > 0 ? { display: "-webkit-box", WebkitLineClamp: String(max), WebkitBoxOrient: "vertical", overflow: "hidden" } : {}) }, { dir: "auto" }, shownText);
         if (isCalculated(c)) formulaShown[c.id] = v => { text.textContent = v; };
+        labelSetters[c.id] = v => { text.textContent = v; };
         if (prop(c, "stat")) {
           // The file counted: the screen's own unless another is chosen ("@main" = the main file).
           const update = () => { text.textContent = withStatistic(shownText || "", statRaw(c) ?? "…"); };
@@ -2161,7 +2311,7 @@ export function runScreen(root, project, screen, store, opts) {
       }
       case "BUTTON": {
         const el = h("button", { ...chrome(c), ...style, width: "100%", height: "100%", cursor: enabled ? "pointer" : "default", display: "flex", alignItems: "center", justifyContent: justify(prop(c, "textAlign")), gap: "4px" },
-          { disabled: !enabled, onclick: () => perform(prop(c, "action"), prop(c, "targetScreen"), c) });
+          { disabled: !enabled, onclick: () => press(c) });
         // A symbol (the same arrows as the editor's undo/redo), beside the text or alone.
         const icon = buttonIcon(prop(c, "buttonIcon"), style.color, Math.max(16, num(c, "fontSize") * 1.4), lang !== "en");
         if (icon) el.append(icon);
