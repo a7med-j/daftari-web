@@ -1183,11 +1183,20 @@ export function computeFormulas(screen, valueOf) {
   const results = {};
   for (let pass = 0; pass < Math.min(formulas.length, 5); pass++) {
     for (const c of formulas) {
-      const v = evaluateFormula(prop(c, "formula"), name => {
+      const formula = prop(c, "formula");
+      const read = [];
+      const v = evaluateFormula(formula, name => {
         const other = byName[normalize(name)];
-        return other ? (results[other.id] ?? valueOf(other)) : "";
+        const value = other ? (results[other.id] ?? valueOf(other)) : "";
+        read.push(String(value ?? ""));
+        return value;
       });
-      results[c.id] = v == null ? "؟" : formatNumber(v);
+      // Nothing to work with yet: no result rather than 0. A sum counts the values it has; a product
+      // or division needs all of them (as FormLogic.computeFormulas).
+      const blank = x => x.trim() === "";
+      const multiplies = /[*\/×÷]/.test(formula.replace(/\[[^\]]*\]/g, ""));
+      const missing = read.length > 0 && (read.every(blank) || (multiplies && read.some(blank)));
+      results[c.id] = missing ? "" : v == null ? "؟" : formatNumber(v);
     }
   }
   return results;
