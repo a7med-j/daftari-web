@@ -1711,8 +1711,35 @@ export function runScreen(root, project, screen, store, opts) {
     const rows = rowsOf(prop(c, "optionsColumn") ? prop(c, "optionsFile") : fileId);
     const header = rows?.[0] || headers;
     const index = name => { if (!name) return null; const i = header.findIndex(x => normalize(x) === normalize(name)); return i < 0 ? null : i; };
-    return listOptions(prop(c, "items"), rows, index(prop(c, "optionsColumn")),
+    const base = listOptions(prop(c, "items"), rows, index(prop(c, "optionsColumn")),
       parent ? index(prop(parent, "optionsColumn")) ?? index(prop(parent, "column")) : null, parent ? toExcel(parent) : null);
+    // A list that allows new choices and keeps them in no options file: the ones saved before are offered too.
+    const own = index(prop(c, "column"));
+    if (!bool(c, "allowNew") || prop(c, "optionsColumn") || parent || own == null) return base;
+    const seen = new Set(base.map(normalize));
+    return [...base, ...(rows || []).slice(1).map(r => String(r[own] ?? "").trim()).filter(v => v && !seen.has(normalize(v)) && seen.add(normalize(v)))];
+  };
+  /**
+   * A choice typed into a list that allows new ones: chosen at once, and added (once) to the list's
+   * options file so it is offered from now on (as PreviewScreen.addOption).
+   */
+  const addOption = async (c, text) => {
+    const v = String(text || "").trim();
+    if (!v) return;
+    setValue(c, v);
+    const column = prop(c, "optionsColumn");
+    if (!column) return;
+    const file = prop(c, "optionsFile");
+    const s = storeOf(file);
+    if (!s) return;
+    try {
+      const rows = await s.rows();
+      const col = (rows[0] || []).findIndex(x => normalize(x) === normalize(column));
+      if (col >= 0 && !rows.slice(1).some(r => normalize(r[col] ?? "") === normalize(v))) await s.append({ [col]: v });
+      const fresh = await s.rows();
+      if (file === fileId) state.sheetRows = fresh; else otherRows[file] = fresh;
+      Object.values(optionRefreshers).forEach(r => r());
+    } catch (e) { toast(opts.errorText(e)); }
   };
   // Tables filtered by a field (its value or the column it names) follow it as it changes.
   const redrawFilteredBy = c => {
@@ -1901,7 +1928,7 @@ export function runScreen(root, project, screen, store, opts) {
       s.rows(true).then(show).catch(() => {});
     }
     const listsFromSheet = screen.components.some(c => c.type === "CHART" || prop(c, "optionsColumn") || prop(c, "scan") === "record" || (c.type === "LABEL" && prop(c, "stat"))
-      || runsAction(c, "upsertRow") || prop(c, "lookupField"));
+      || runsAction(c, "upsertRow") || prop(c, "lookupField") || (c.type === "DROPDOWN" && bool(c, "allowNew")));
     if (!tables.length && !listsFromSheet) { state.sheetRows = null; return; } // suggestions read the sheet again when needed
     const show = rows => {
       state.sheetRows = rows;
@@ -2463,11 +2490,20 @@ export function runScreen(root, project, screen, store, opts) {
           };
           return el;
         }
+        // A list that allows new choices ends with "add a new one…", which asks for it.
+        const NEW = "\u0000new";
+        const allowNew = bool(c, "allowNew") && opts.canEdit !== false;
         const select = h("select", { ...style, width: "100%", height: "100%", border: "none", background: "transparent", outline: "none" },
-          { disabled: !enabled, onchange: e => setValue(c, e.target.value) });
+          { disabled: !enabled, onchange: e => {
+            if (e.target.value !== NEW) return setValue(c, e.target.value);
+            sync(values[c.id]);
+            const typed = window.prompt(prop(c, "hint") || t("اكتب الخيار الجديد", "Type the new choice"), "");
+            if (typed && typed.trim()) addOption(c, typed.slice(0, 100));
+          } });
         const sync = v => {
           select.replaceChildren(h("option", {}, { value: "" }, prop(c, "hint")), ...items.map(item => h("option", {}, { value: item }, item)));
           if (v && !items.includes(v)) select.append(h("option", {}, { value: v }, v));
+          if (allowNew) select.append(h("option", {}, { value: NEW }, t("+ إضافة جديد…", "+ Add a new one…")));
           select.value = v || "";
         };
         optionRefreshers[c.id] = () => { items = optionsFor(c); sync(values[c.id]); };
