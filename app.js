@@ -67,6 +67,7 @@ function errorText(e) {
   if (code.includes("permission-denied")) return t("ليست لديك صلاحية على هذا التطبيق.", "You don't have access to this app.");
   if (code === "not-found-code") return t("الرمز غير صحيح.", "That code doesn't exist.");
   if (code === "app-gone") return t("هذا التطبيق لم يعد موجودًا.", "This app no longer exists.");
+  if (code === "pending") return t("هذا التطبيق خاص. أُرسل طلب دخولك إلى صاحبه، وتستطيع فتحه بعد موافقته.", "This app is private. Your request to enter was sent to its owner; you can open it once they approve.");
   if (code.includes("invalid-credential") || code.includes("wrong-password") || code.includes("user-not-found"))
     return t("البريد أو كلمة المرور غير صحيحة.", "Wrong email or password.");
   if (code.includes("email-already-in-use")) return t("هذا البريد مسجّل مسبقًا. سجّل الدخول بدلًا من ذلك.", "This email already has an account. Sign in instead.");
@@ -127,12 +128,29 @@ async function join(user, code) {
   const { appId, ownerUid } = codeDoc.data();
   if (ownerUid !== user.uid) {
     // Already a member: joining again keeps the membership (and the access the owner gave).
-    const member = await getDoc(doc(db, "apps", appId, "members", user.uid)).catch(() => null);
+    const memberRef = doc(db, "apps", appId, "members", user.uid);
+    const member = await getDoc(memberRef).catch(() => null);
+    // A private app: whoever joins waits for the owner's yes (the rules insist on it).
+    const waiting = async () => {
+      if (!user.isAnonymous) {
+        const name = (await getDoc(doc(db, "publicApps", appId)).catch(() => null))?.data()?.name || "";
+        await setDoc(doc(db, "users", user.uid, "joined", appId), { name, ownerEmail: "", joinedAt: Date.now(), pending: true }).catch(() => {});
+      }
+      throw fail("pending");
+    };
     if (!member?.exists()) {
+      const info = (await getDoc(doc(db, "publicApps", appId)).catch(() => null))?.data();
       const fields = { code, email: user.email || "", name: (user.displayName || "").trim(), joinedAt: Date.now() };
-      // Editors at once when the owner chose so (the rules refuse it otherwise, then as a viewer).
-      await setDoc(doc(db, "apps", appId, "members", user.uid), { ...fields, role: "editor" })
-        .catch(e => { if (!String(e.code).includes("permission-denied")) throw e; return setDoc(doc(db, "apps", appId, "members", user.uid), fields); });
+      const pending = { ...fields, status: "pending" };
+      // Editors at once when the owner chose so (the rules refuse it otherwise, then as a viewer; and
+      // when the app turned private since its public card was written, as waiting).
+      const tries = info?.approval ? [pending] : [{ ...fields, role: "editor" }, fields, pending];
+      for (let i = 0; i < tries.length; i++) {
+        try { await setDoc(memberRef, tries[i]); if (tries[i].status === "pending") await waiting(); break; }
+        catch (e) { if (e?.code === "pending" || !String(e.code).includes("permission-denied") || i === tries.length - 1) throw e; }
+      }
+    } else if (member.data().status === "pending") {
+      await waiting();
     }
   }
   const app = await getDoc(doc(db, "apps", appId));
@@ -220,7 +238,7 @@ async function homeView(user) {
       const mine = (await getDocs(query(collection(db, "apps"), where("ownerUid", "==", user.uid)))).docs
         .map(d => ({ id: d.id, name: d.data().name, sub: t("الرمز: ", "Code: ") + d.data().shareCode }));
       const joined = (await getDocs(collection(db, "users", user.uid, "joined"))).docs
-        .map(d => ({ id: d.id, name: d.data().name, sub: t("من: ", "From: ") + d.data().ownerEmail }));
+        .map(d => ({ id: d.id, name: d.data().name, sub: d.data().pending ? t("⏳ بانتظار موافقة صاحب التطبيق", "⏳ Waiting for the owner's approval") : t("من: ", "From: ") + d.data().ownerEmail }));
       const all = [...mine, ...joined];
       list.replaceChildren(...(all.length ? all.map(a => el("button", { class: "app", onclick: () => openApp(a.id) },
         el("b", {}, a.name || "—"), el("small", {}, a.sub))) : [el("p", { class: "muted" }, t("لا توجد تطبيقات بعد. اكتب رمزًا أرسله لك صاحب التطبيق.", "No apps yet. Type a code someone sent you."))]));
@@ -262,6 +280,11 @@ async function appView(user, appId) {
       const again = () => { fromServer.add(appId); route(); };
       if (kept) getDocFromServer(appRef).then(s => { if (!s.exists()) again(); }).catch(e => { if (String(e.code).includes("permission-denied")) again(); });
       const data = snap.data();
+      // Let into a private app since joining: the home list stops saying "waiting".
+      if (!kept && data.ownerUid !== user.uid && !user.isAnonymous) {
+        const joinedRef = doc(db, "users", user.uid, "joined", appId);
+        getDoc(joinedRef).then(j => { if (j.data()?.pending) return setDoc(joinedRef, { name: data.name || "", ownerEmail: data.ownerEmail || "", pending: false }, { merge: true }); }).catch(() => {});
+      }
       const project = JSON.parse(data.json);
       document.title = project.name;
       // The owner's security settings (My apps → Security): lock and working offline.
@@ -319,9 +342,11 @@ async function appView(user, appId) {
       });
       cleanup = app.cleanup;
     } catch (e) {
-      // Paused by its owner: show the owner's message.
+      // Paused by its owner: show the owner's message. Waiting to be let into a private app: say so.
       const info = (await getDoc(doc(db, "publicApps", appId)).catch(() => null))?.data();
-      stage.replaceChildren(el("p", { class: "muted" }, info?.paused ? (info.pausedMessage || t("التطبيق متوقف مؤقتًا من صاحبه.", "The app is paused by its owner.")) : errorText(e)));
+      const mine = (await getDoc(doc(db, "apps", appId, "members", user.uid)).catch(() => null))?.data();
+      stage.replaceChildren(el("p", { class: "muted" }, info?.paused ? (info.pausedMessage || t("التطبيق متوقف مؤقتًا من صاحبه.", "The app is paused by its owner."))
+        : mine?.status === "pending" ? errorText(fail("pending")) : errorText(e)));
     }
   })();
   return wrap;
