@@ -1997,6 +1997,12 @@ export function runScreen(root, project, screen, store, opts) {
     if (writes && opts.canEdit === false) { noAccess(); return false; }
     if (!binds.length) return fail(t("لا يوجد حقل مرتبط بعمود.", "No field is linked to a column."));
     if (state.working) return false;
+    // Filled-in fields linked to no column are not saved: the app's owner is told which (as PreviewScreen).
+    const unsaved = ["addRow", "upsertRow", "updateRow"].includes(action) && opts.canEdit !== false && opts.canDelete !== false
+      ? screen.components.filter(c => INPUT_TYPES.has(c.type) && !binds.some(([b]) => b === c) && isShown(c)
+          && !prop(c, "formula") && !prop(c, "lookupField")
+          && (c.type === "CHECKBOX" ? values[c.id] === "true" : String(toExcel(c)).trim() !== "")).map(c => c.name)
+      : [];
     state.working = true;
     try {
       if (action === "upsertRow") {
@@ -2093,6 +2099,9 @@ export function runScreen(root, project, screen, store, opts) {
         saved(t(`تم حذف الصف ${row}`, `Row ${row} deleted`));
       }
       await reloadTables();
+      if (unsaved.length) await logicDialog(t(
+        "حُفظ السجل، لكن هذه الحقول غير مرتبطة بعمود في ملف Excel فلم تُحفظ قيمتها:\n" + unsaved.join("، ") + "\n\nاربط كل حقل من: الخصائص ← الأساسيات ← «العمود المرتبط».",
+        "The record was saved, but these fields are linked to no column of the Excel file, so their values weren't saved:\n" + unsaved.join(", ") + "\n\nLink each one in: Properties → Basics → \"Linked column\"."), false);
     } catch (e) {
       if (writes && String(e?.code || "").includes("permission-denied")) noAccess();
       else toast(opts.errorText(e));
