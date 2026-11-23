@@ -1566,6 +1566,7 @@ export function runScreen(root, project, screen, store, opts) {
   const formulaShown = {}; // component id -> function(text) for calculated fields
   const rowsOf = id => (id === fileId ? state.sheetRows : otherRows[id]);
   const lastLooked = {}; // field id -> the value last found for it in a file
+  let lookedLabels = {}; // label id -> the value found for it in a file
   const recompute = () => {
     const looked = lookups(screen, c => values[c.id] ?? "", rowsOf);
     const labels = {};
@@ -1576,8 +1577,9 @@ export function runScreen(root, project, screen, store, opts) {
       if (before === undefined ? v !== "" && !(values[id] || "").trim() : before !== v) { values[id] = v; inputs[id]?.(v); }
       lastLooked[id] = v;
     }
-    // Calculations can use statistics (e.g. profits minus expenses).
-    computed = { ...computeFormulas(screen, c => (c.type === "LABEL" ? (prop(c, "stat") ? statRaw(c) ?? c.text : c.text) : values[c.id] ?? "")), ...labels };
+    // Calculations can use statistics and values found in a file (e.g. a contract minus what was paid).
+    lookedLabels = labels;
+    computed = { ...computeFormulas(screen, c => (c.type === "LABEL" ? labels[c.id] ?? (prop(c, "stat") ? statRaw(c) ?? c.text : c.text) : values[c.id] ?? "")), ...labels };
     for (const [id, show] of Object.entries(formulaShown)) show(computed[id] ?? "");
     refreshShownLater();
   };
@@ -2141,7 +2143,7 @@ export function runScreen(root, project, screen, store, opts) {
 
   /** The value a block reads: as saved (checkboxes as نعم/لا), with calculations worked out now. */
   const liveValue = c => {
-    const fresh = computeFormulas(screen, x => (x.type === "LABEL" ? logicTexts[x.id] ?? (prop(x, "stat") ? statRaw(x) ?? x.text : x.text) : values[x.id] ?? ""));
+    const fresh = computeFormulas(screen, x => (x.type === "LABEL" ? logicTexts[x.id] ?? lookedLabels[x.id] ?? (prop(x, "stat") ? statRaw(x) ?? x.text : x.text) : values[x.id] ?? ""));
     if (c.id in fresh) return fresh[c.id];
     if (c.type === "LABEL") return logicTexts[c.id] ?? (prop(c, "stat") ? withStatistic(c.text || "", statRaw(c) ?? "") : computed[c.id] ?? withUserName(c.text, opts.user));
     return toExcel(c);
