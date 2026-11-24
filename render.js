@@ -1267,6 +1267,18 @@ export function summary(rows, numbers, groupColumn, columns, total = false, hide
 }
 
 /** A date written with `pattern` ("yyyy/MM" or one with days) moved on by `steps` months, or null. */
+/** Names of fields used only to control others (see FormLogic.controlFields): they need no column. */
+const CONTROL_KEYS = ["filterColumnField", "filterField", "lookupField", "repeatField", "repeatDateField", "repeatAfterField", "showIfField", "statFilterField", "tableFileField"];
+function controlFields(screen) {
+  const out = new Set();
+  for (const c of screen.components) {
+    for (const k of CONTROL_KEYS) { const v = (c.properties || {})[k]; if (v && v.trim()) out.add(normalize(v)); }
+    const f = (c.properties || {}).formula;
+    if (f) for (const m of f.matchAll(/\[([^\[\]]+)\]|([\p{L}_][\p{L}\p{N}_]*)/gu)) out.add(normalize(m[1] || m[2]));
+  }
+  return out;
+}
+
 /** The period after the latest date in dateCol among rows whose keyCol is keyValue (see FormLogic.nextAfterLatest); null when none. */
 export function nextAfterLatest(rows, keyCol, keyValue, dateCol, pattern) {
   const wanted = normalize(keyValue);
@@ -2055,7 +2067,7 @@ export function runScreen(root, project, screen, store, opts) {
     if (state.working) return false;
     // Filled-in fields linked to no column are not saved: the app's owner is told which (as PreviewScreen).
     const unsaved = ["addRow", "upsertRow", "updateRow"].includes(action) && opts.canEdit !== false && opts.canDelete !== false
-      ? screen.components.filter(c => INPUT_TYPES.has(c.type) && !binds.some(([b]) => b === c) && isShown(c)
+      ? screen.components.filter(c => INPUT_TYPES.has(c.type) && !binds.some(([b]) => b === c) && isShown(c) && !controlFields(screen).has(normalize(c.name))
           && !prop(c, "formula") && !prop(c, "lookupField")
           && (c.type === "CHECKBOX" ? values[c.id] === "true" : String(toExcel(c)).trim() !== "")).map(c => c.name)
       : [];
