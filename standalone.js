@@ -24,6 +24,7 @@ export async function runStandalone(CONFIG, ICON) {
     const code = e?.code || "";
     if (code.includes("unavailable") || code.includes("network")) return t("لا يوجد اتصال بالإنترنت.", "No internet connection.");
     if (code.includes("permission-denied")) return t("ليست لديك صلاحية على هذا التطبيق.", "You don't have access to this app.");
+    if (code === "pending") return t("هذا التطبيق خاص. أُرسل طلب دخولك إلى صاحبه، وتستطيع فتحه بعد موافقته.", "This app is private. Your request to enter was sent to its owner; you can open it once they approve.");
     if (code === "not-found-code") return t("تغيّر رمز هذا التطبيق. اطلب نسخة جديدة من صاحبه.", "This app's code changed. Ask its owner for a new copy.");
     if (code === "app-gone") return t("هذا السجل لم يعد موجودًا.", "That record no longer exists.");
     if (code.includes("invalid-credential") || code.includes("wrong-password") || code.includes("user-not-found")) return t("البريد أو كلمة المرور غير صحيحة.", "Wrong email or password.");
@@ -255,11 +256,27 @@ export async function runStandalone(CONFIG, ICON) {
     const codeDoc = await fb.getDoc(fb.doc(db, "shareCodes", CONFIG.shareCode));
     if (!codeDoc.exists() || codeDoc.data().appId !== CONFIG.appId) throw fail("not-found-code");
     if (codeDoc.data().ownerUid !== user.uid) {
-      const fields = { code: CONFIG.shareCode, email: user.email || "", name: (user.displayName || "").trim(), joinedAt: Date.now() };
       const ref = fb.doc(db, "apps", CONFIG.appId, "members", user.uid);
-      // Editors at once when the owner chose so (the rules refuse it otherwise, then as a viewer).
-      await fb.setDoc(ref, { ...fields, role: "editor" })
-        .catch(e => { if (!String(e.code).includes("permission-denied")) throw e; return fb.setDoc(ref, fields); });
+      // Asked before and still waiting for the owner's yes (a private app).
+      const mine = await fb.getDoc(ref).catch(() => null);
+      if (mine?.exists()) {
+        if (mine.data().status === "pending") throw fail("pending");
+        return;
+      }
+      const fields = { code: CONFIG.shareCode, email: user.email || "", name: (user.displayName || "").trim(), joinedAt: Date.now() };
+      const pending = { ...fields, status: "pending" };
+      // A private app: the request waits for the owner (the rules insist on it). Otherwise editors at
+      // once when the owner chose so (the rules refuse it otherwise, then as a viewer; and when the app
+      // turned private since its public card was written, as waiting).
+      const info = await publicInfo();
+      const tries = info?.approval ? [pending] : [{ ...fields, role: "editor" }, fields, pending];
+      for (let i = 0; i < tries.length; i++) {
+        try { await fb.setDoc(ref, tries[i]); break; }
+        catch (e) { if (!String(e.code).includes("permission-denied") || i === tries.length - 1) throw e; }
+        // (the loop goes on to the next try)
+      }
+      const now = await fb.getDoc(ref).catch(() => null);
+      if (now?.data()?.status === "pending") throw fail("pending");
     }
   }
 
@@ -337,7 +354,10 @@ export async function runStandalone(CONFIG, ICON) {
       const text = info?.paused ? (info.pausedMessage || t("التطبيق متوقف مؤقتًا من صاحبه.", "The app is paused by its owner."))
         : user.isAnonymous && !info?.guests ? t("صاحب التطبيق أوقف الدخول بدون حساب. سجّل دخولك بحسابك.", "The owner no longer allows guests. Sign in with your account.")
         : errorText(e);
+      // Waiting for the owner's yes: a button to look again once they approve.
+      const waiting = e?.code === "pending";
       stage.replaceChildren(node("div", { class: "center" }, node("p", {}, text),
+        waiting ? node("button", { class: "lnk", onclick: () => openShared(user, true) }, t("تحقّق مرة أخرى", "Check again")) : null,
         node("button", { class: "lnk", onclick: () => { guestLeft = true; fb.signOut(fb.auth); } }, t("تسجيل الخروج", "Sign out"))));
     }
   }
