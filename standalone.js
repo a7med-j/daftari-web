@@ -356,6 +356,8 @@ export async function runStandalone(CONFIG, ICON) {
         : errorText(e);
       // Waiting for the owner's yes: a button to look again once they approve.
       const waiting = e?.code === "pending";
+      // The page's own dark background (an app screen may have left a light one), so the message shows.
+      document.body.style.background = "";
       stage.replaceChildren(node("div", { class: "center" }, node("p", {}, text),
         waiting ? node("button", { class: "lnk", onclick: () => openShared(user, true) }, t("تحقّق مرة أخرى", "Check again")) : null,
         node("button", { class: "lnk", onclick: () => { guestLeft = true; fb.signOut(fb.auth); } }, t("تسجيل الخروج", "Sign out"))));
