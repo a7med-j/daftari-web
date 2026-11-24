@@ -1267,6 +1267,20 @@ export function summary(rows, numbers, groupColumn, columns, total = false, hide
 }
 
 /** A date written with `pattern` ("yyyy/MM" or one with days) moved on by `steps` months, or null. */
+/** The period after the latest date in dateCol among rows whose keyCol is keyValue (see FormLogic.nextAfterLatest); null when none. */
+export function nextAfterLatest(rows, keyCol, keyValue, dateCol, pattern) {
+  const wanted = normalize(keyValue);
+  if (!wanted) return null;
+  let latest = null, latestKey = null;
+  for (const r of (rows || []).slice(1)) {
+    if (normalize(r[keyCol] ?? "") !== wanted) continue;
+    const v = String(r[dateCol] ?? "");
+    const key = addPeriods(v, pattern, 0); // the same date, written in full: orders as text
+    if (key && (latestKey == null || key > latestKey)) { latestKey = key; latest = v; }
+  }
+  return latest == null ? null : addPeriods(latest, pattern, 1);
+}
+
 export function addPeriods(value, pattern, steps) {
   const m = toWestern(value).trim().match(/^(\d{4})\/(\d{1,2})(?:\/(\d{1,2}))?$/);
   const p = pattern || "yyyy/MM/dd";
@@ -1567,6 +1581,7 @@ export function runScreen(root, project, screen, store, opts) {
   const rowsOf = id => (id === fileId ? state.sheetRows : otherRows[id]);
   const lastLooked = {}; // field id -> the value last found for it in a file
   let lookedLabels = {}; // label id -> the value found for it in a file
+  const lastContinued = {}; // date field id -> the period after the chosen member's last record
   const recompute = () => {
     const looked = lookups(screen, c => values[c.id] ?? "", rowsOf);
     const labels = {};
@@ -1576,6 +1591,17 @@ export function runScreen(root, project, screen, store, opts) {
       const before = lastLooked[id];
       if (before === undefined ? v !== "" && !(values[id] || "").trim() : before !== v) { values[id] = v; inputs[id]?.(v); }
       lastLooked[id] = v;
+    }
+    // A date that continues from the chosen member's last record (the month after their last payment):
+    // filled when the member is chosen, and can still be changed.
+    for (const b of screen.components) {
+      if (b.type !== "BUTTON" || !prop(b, "repeatAfterField")) continue;
+      const key = byName(prop(b, "repeatAfterField")), date = byName(prop(b, "repeatDateField"));
+      const keyCol = key && binds.find(([x]) => x === key)?.[1], dateCol = date && binds.find(([x]) => x === date)?.[1];
+      if (keyCol == null || dateCol == null || !state.sheetRows) continue;
+      const v = nextAfterLatest(state.sheetRows, keyCol, toExcel(key), dateCol, prop(date, "dateFormat")) || "";
+      if (v && lastContinued[date.id] !== v) { values[date.id] = v; inputs[date.id]?.(v); }
+      lastContinued[date.id] = v;
     }
     // Calculations can use statistics and values found in a file (e.g. a contract minus what was paid).
     lookedLabels = labels;
@@ -1930,7 +1956,8 @@ export function runScreen(root, project, screen, store, opts) {
       s.rows(true).then(show).catch(() => {});
     }
     const listsFromSheet = screen.components.some(c => c.type === "CHART" || prop(c, "optionsColumn") || prop(c, "scan") === "record" || (c.type === "LABEL" && prop(c, "stat"))
-      || runsAction(c, "upsertRow") || prop(c, "lookupField") || (c.type === "DROPDOWN" && bool(c, "allowNew")));
+      || runsAction(c, "upsertRow") || prop(c, "lookupField") || (c.type === "DROPDOWN" && bool(c, "allowNew"))
+      || (c.type === "BUTTON" && prop(c, "repeatAfterField")));
     if (!tables.length && !listsFromSheet) { state.sheetRows = null; return; } // suggestions read the sheet again when needed
     const show = rows => {
       state.sheetRows = rows;
