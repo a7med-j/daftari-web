@@ -2072,6 +2072,18 @@ export function runScreen(root, project, screen, store, opts) {
           && (c.type === "CHECKBOX" ? values[c.id] === "true" : String(toExcel(c)).trim() !== "")).map(c => c.name)
       : [];
     state.working = true;
+    // Says what is being done when it takes a moment ("Saving…"); questions and messages show above it.
+    const busyText = ["addRow", "upsertRow", "updateRow"].includes(action) ? t("جاري الحفظ…", "Saving…")
+      : action === "deleteRow" ? t("جاري الحذف…", "Deleting…") : action === "search" ? t("جاري البحث…", "Searching…") : t("لحظة…", "One moment…");
+    let busy = null;
+    const busyTimer = setTimeout(() => {
+      busy = h("div", { position: "fixed", inset: "0", display: "flex", alignItems: "center", justifyContent: "center", zIndex: "55", background: "#0004" }, {},
+        h("div", { display: "flex", alignItems: "center", gap: "12px", padding: "16px 22px", borderRadius: "14px", background: "#172C24", color: "#fff", fontSize: "16px", boxShadow: "0 4px 16px rgba(0,0,0,.3)" }, {},
+          h("div", { width: "22px", height: "22px", borderRadius: "50%", border: "3px solid #20B87944", borderTopColor: "#20B879", animation: "waraqa-spin .8s linear infinite" }),
+          busyText));
+      if (!document.getElementById("waraqa-spin")) document.head.append(Object.assign(document.createElement("style"), { id: "waraqa-spin", textContent: "@keyframes waraqa-spin{to{transform:rotate(360deg)}}" }));
+      document.body.append(busy);
+    }, 250);
     try {
       if (action === "upsertRow") {
         const key = byName(button ? prop(button, "searchField") : "");
@@ -2175,6 +2187,8 @@ export function runScreen(root, project, screen, store, opts) {
       else toast(opts.errorText(e));
       return false;
     } finally {
+      clearTimeout(busyTimer);
+      busy?.remove();
       state.working = false;
     }
   }
